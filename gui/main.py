@@ -13,6 +13,8 @@ from core.scheduler import ScanScheduler
 from core.network_monitor import NetworkMonitor
 from core.behavior_monitor import BehaviorMonitor
 from core.alert_system import AlertSystem
+from core.zt_health import ZTHealthAttestation
+from core.threat_store import ThreatStore
 
 # ========== WORKERS ==========
 class ScanWorker(QObject):
@@ -88,12 +90,40 @@ class AntivirusGUI(QMainWindow):
         self.alert_history = []
         self.behavior_monitor = BehaviorMonitor()
         self.alert_system = AlertSystem(self)
+
+        # Componentes avanzados (iteraciones 2 y 3)
+        self.threat_store = ThreatStore(self.config.get("threat_store_db"))
+        self.zt = ZTHealthAttestation(self.engine, self.threat_store, self.config)
+
         self._initUI()
         self._start_behavior_monitor()
 
     def _load_config(self):
-        with open('config.json', 'r') as f:
-            return json.load(f)
+        """
+        Busca la configuración en este orden:
+          1. config.local.json (configuración del usuario, ignorada por git)
+          2. config.example.json (plantilla del repositorio)
+          3. config.json (nombre antiguo, retrocompatibilidad)
+          4. /etc/antivirus-linux-dragon/config.local.json (instalación vía .deb)
+
+        Si ninguna existe, lanza FileNotFoundError con un mensaje claro.
+        """
+        candidates = [
+            Path("config.local.json"),
+            Path("config.example.json"),
+            Path("config.json"),
+            Path("/etc/antivirus-linux-dragon/config.local.json"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                with open(candidate, 'r') as f:
+                    print(f"[i] Cargando configuración desde: {candidate}")
+                    return json.load(f)
+        raise FileNotFoundError(
+            "No se encontró ninguna configuración. Se buscó en: "
+            + ", ".join(str(c) for c in candidates)
+            + ".\nCopia config.example.json a config.local.json y ajústalo."
+        )
     def _save_config(self):
         with open('config.json', 'w') as f:
             json.dump(self.config, f, indent=2)
@@ -132,6 +162,7 @@ class AntivirusGUI(QMainWindow):
         self.tab_q = QWidget()
         self.tab_network = QWidget()
         self.tab_alerts = QWidget()  # NUEVA: pestaña de alertas
+        self.tab_zt = QWidget()      # NUEVA: pestaña Zero Trust
         self.tab_logs = QWidget()
 
         self.tabs.addTab(self.tab_dashboard, "📊 Dashboard")
@@ -141,6 +172,7 @@ class AntivirusGUI(QMainWindow):
         self.tabs.addTab(self.tab_q, "🗑️ Cuarentena")
         self.tabs.addTab(self.tab_network, "🌐 Red")
         self.tabs.addTab(self.tab_alerts, "🚨 Alertas")
+        self.tabs.addTab(self.tab_zt, "🛡️ Zero Trust")
         self.tabs.addTab(self.tab_logs, "📜 Logs")
         main_layout.addWidget(self.tabs)
 
@@ -151,6 +183,7 @@ class AntivirusGUI(QMainWindow):
         self._init_quarantine()
         self._init_network()
         self._init_alerts()  # NUEVO
+        self._init_zt()      # NUEVO: pestaña Zero Trust
         self._init_logs()
 
         self.statusBar().showMessage("Listo")
@@ -641,6 +674,135 @@ class AntivirusGUI(QMainWindow):
         self.card_alerts.label.setText(str(len(self.alert_history)))
 
     # ========== LOGS ==========
+    # ========== ZERO TRUST ==========
+    def _init_zt(self):
+        layout = QVBoxLayout(self.tab_zt)
+
+        # Cabecera con score
+        header = QHBoxLayout()
+        self.zt_score_label = QLabel("Score: —")
+        self.zt_score_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #00ffcc;")
+        header.addWidget(self.zt_score_label)
+        header.addStretch()
+
+        self.zt_refresh_btn = QPushButton("🔄 Refrescar Atestación")
+        self.zt_refresh_btn.clicked.connect(self._refresh_zt)
+        self.zt_refresh_btn.setStyleSheet("background:#2a5a7a;padding:10px;border-radius:8px;font-weight:bold;")
+        header.addWidget(self.zt_refresh_btn)
+        layout.addLayout(header)
+
+        # Barra de progreso del score
+        self.zt_score_bar = QProgressBar()
+        self.zt_score_bar.setRange(0, 100)
+        self.zt_score_bar.setValue(0)
+        self.zt_score_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #00ffcc;
+                border-radius: 8px;
+                text-align: center;
+                background: #1e1e1e;
+            }
+            QProgressBar::chunk {
+                background-color: #00ffcc;
+                border-radius: 6px;
+            }
+        """)
+        layout.addWidget(self.zt_score_bar)
+
+        # Hash de atestación
+        self.zt_hash_label = QLabel("Attestation hash: —")
+        self.zt_hash_label.setStyleSheet("font-family: monospace; color: #aaa; padding: 5px;")
+        self.zt_hash_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.zt_hash_label)
+
+        # Tabla de checks
+        self.zt_table = QTableWidget()
+        self.zt_table.setColumnCount(3)
+        self.zt_table.setHorizontalHeaderLabels(["Check", "Estado", "Valor"])
+        self.zt_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.zt_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.zt_table)
+
+        # Info textual al pie
+        info = QLabel(
+            "Zero Trust Attestation: score de salud del endpoint (0-100). "
+            "Un Policy Decision Point (PDP) puede consultar este score antes "
+            "de conceder acceso a recursos críticos."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #888; padding: 10px; font-style: italic;")
+        layout.addWidget(info)
+
+    def _refresh_zt(self):
+        """Refresca la atestación en un worker para no bloquear la UI."""
+        self.zt_refresh_btn.setEnabled(False)
+        self.zt_refresh_btn.setText("⏳ Calculando...")
+
+        self.zt_thread = QThread()
+        self.zt_worker = ZTWorker(self.zt)
+        self.zt_worker.moveToThread(self.zt_thread)
+        self.zt_worker.finished.connect(self._zt_finished)
+        self.zt_worker.finished.connect(self.zt_thread.quit)
+        self.zt_worker.finished.connect(self.zt_worker.deleteLater)
+        self.zt_thread.finished.connect(self.zt_thread.deleteLater)
+        self.zt_thread.started.connect(self.zt_worker.run)
+        self.zt_thread.start()
+
+    def _zt_finished(self, result):
+        self.zt_refresh_btn.setEnabled(True)
+        self.zt_refresh_btn.setText("🔄 Refrescar Atestación")
+
+        if isinstance(result, Exception):
+            QMessageBox.critical(self, "Error", f"No se pudo calcular la atestación: {result}")
+            return
+
+        snapshot = result
+        score = snapshot.get("score", 0)
+        self.zt_score_label.setText(f"Score: {score}/100")
+        self.zt_score_bar.setValue(score)
+
+        # Color según score
+        if score >= 80:
+            color = "#00ffcc"  # verde-cyan
+        elif score >= 50:
+            color = "#ffaa00"  # naranja
+        else:
+            color = "#ff5555"  # rojo
+        self.zt_score_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
+
+        self.zt_hash_label.setText(f"Attestation hash: {snapshot.get('attestation_hash', '—')}")
+
+        # Rellenar tabla
+        checks = [
+            ("ClamAV daemon corriendo", snapshot.get("clamd_running")),
+            ("Firmas ClamAV actualizadas (<2 días)", 0 <= snapshot.get("clamav_signatures_age_days", -1) < 2),
+            ("iptables activo", snapshot.get("iptables_active")),
+            ("SSH root login deshabilitado", snapshot.get("ssh_root_login_disabled")),
+            ("Actualizaciones automáticas", snapshot.get("unattended_upgrades")),
+            ("Cifrado de disco (LUKS)", snapshot.get("disk_encryption")),
+            ("Sin alertas críticas en 24h", snapshot.get("recent_critical_alerts_24h") == 0),
+        ]
+
+        self.zt_table.setRowCount(len(checks))
+        for i, (name, ok) in enumerate(checks):
+            self.zt_table.setItem(i, 0, QTableWidgetItem(name))
+            status_item = QTableWidgetItem("✅ OK" if ok else "❌ FALLA")
+            if ok:
+                status_item.setForeground(Qt.GlobalColor.green)
+            else:
+                status_item.setForeground(Qt.GlobalColor.red)
+            self.zt_table.setItem(i, 1, status_item)
+            # Valor crudo
+            value_item = QTableWidgetItem(str(ok))
+            self.zt_table.setItem(i, 2, value_item)
+
+        # Metadatos
+        meta_row = self.zt_table.rowCount()
+        self.zt_table.insertRow(meta_row)
+        self.zt_table.setItem(meta_row, 0, QTableWidgetItem("Hostname"))
+        self.zt_table.setItem(meta_row, 1, QTableWidgetItem(snapshot.get("hostname", "—")))
+        self.zt_table.setItem(meta_row, 2, QTableWidgetItem(snapshot.get("kernel", "—")))
+
     def _init_logs(self):
         layout = QVBoxLayout(self.tab_logs)
         self.log_text = QTextEdit()
@@ -753,6 +915,23 @@ class AntivirusGUI(QMainWindow):
     def closeEvent(self, event):
         self._save_config()
         event.accept()
+
+# ========== WORKER PARA ZERO TRUST ==========
+class ZTWorker(QObject):
+    """Ejecuta zt.attest() en un hilo para no bloquear la UI."""
+    finished = pyqtSignal(object)
+
+    def __init__(self, zt):
+        super().__init__()
+        self.zt = zt
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            result = self.zt.attest()
+            self.finished.emit(result)
+        except Exception as exc:
+            self.finished.emit(exc)
 
 # ========== DIÁLOGO PARA TAREAS ==========
 class TaskDialog(QDialog):
