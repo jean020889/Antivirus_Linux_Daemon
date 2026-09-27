@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, os, json, subprocess, time, shutil, threading
+from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -257,7 +258,7 @@ class AntivirusGUI(QMainWindow):
     def _init_scanner(self):
         layout = QVBoxLayout(self.tab_scanner)
         hb = QHBoxLayout()
-        self.path_input = QLineEdit("/home/asus")
+        self.path_input = QLineEdit(str(Path.home()))
         browse_btn = QPushButton("📂 Examinar")
         browse_btn.clicked.connect(self._browse)
         hb.addWidget(QLabel("Ruta:")); hb.addWidget(self.path_input); hb.addWidget(browse_btn)

@@ -1,0 +1,126 @@
+# ============================================================
+#  .gitignore — Antivirus Profesional para Linux
+# ============================================================
+
+# ---------- Entornos virtuales ----------
+venv/
+env/
+.venv/
+ENV/
+
+# ---------- Caché de Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---------- Tests ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ---------- Type checkers ----------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ---------- Logs y datos de ejecución ----------
+logs/
+*.log
+*.pid
+
+# ---------- Cuarentena ----------
+cuarentena/
+antivirus_cuarentena/
+/opt/antivirus_cuarentena/
+
+# ---------- Base de datos forense ----------
+threat_store.db
+*.sqlite
+*.sqlite3
+*.db
+
+# ---------- Configuración local (con rutas personales) ----------
+config.local.json
+config.json
+!config.example.json
+
+# ---------- Extracción temporal de archivos comprimidos ----------
+/tmp/av_extract/
+av_extract/
+
+# ---------- IDE / editores ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ---------- Sistema operativo ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ---------- Secretos y credenciales ----------
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+secrets/
+.env
+.env.local
+.env.*.local
+
+# ---------- YARA rules descargadas por git clone (se regeneran con install.sh) ----------
+yara_rules/Neo23x0/
+yara_rules/YARA-Rules/
+
+# ---------- Reglas Sigma descargadas ----------
+sigma_rules/*.yml
+!sigma_rules/*.example.yml
+
+# ---------- Empaquetado ----------
+*.deb
+*.rpm
+*.AppImage
+*.exe
+*.msi
+*.snap
+
+# ---------- Backups ----------
+*.bak
+*.backup
+*.old
+*.orig

@@ -1,0 +1,43 @@
+{
+  "_comment": "Copia este archivo a config.local.json y ajusta las rutas personales.",
+  "cuarentena": "~/antivirus_cuarentena",
+  "logs": "./logs",
+  "max_firmas": 300000,
+  "temp_extract": "/tmp/av_extract",
+  "clamd_pool_size": 4,
+  "umbral_riesgo": 0.7,
+  "sigma_rules_dir": "sigma_rules",
+  "realtime_dirs": [
+    "~/",
+    "/tmp",
+    "/var/tmp"
+  ],
+  "scheduled_scans": [
+    {
+      "id": 1,
+      "name": "Analisis Completo del Sistema",
+      "type": "full_system",
+      "hour": 3,
+      "minute": 0,
+      "active": true
+    },
+    {
+      "id": 2,
+      "name": "Analisis de Carpeta Descargas",
+      "type": "folder",
+      "folder_path": "~/Descargas",
+      "hour": 14,
+      "minute": 30,
+      "active": true
+    },
+    {
+      "id": 3,
+      "name": "Analisis Nocturno de /tmp",
+      "type": "folder",
+      "folder_path": "/tmp",
+      "hour": 22,
+      "minute": 0,
+      "active": true
+    }
+  ]
+}

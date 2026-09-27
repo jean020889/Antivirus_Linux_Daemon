@@ -1,0 +1,24 @@
+# ============================================================
+#  DEPENDENCIAS DEL ANTIVIRUS PROFESIONAL PARA LINUX
+# ============================================================
+
+# --- Motor y análisis ---
+apscheduler>=3.10.0              # Planificador de tareas
+psutil>=5.9.0                    # Monitoreo de procesos y red
+watchdog>=3.0.0                  # Vigilancia en tiempo real (inotify)
+python-magic>=0.4.27             # Detección de tipos MIME (archivos comprimidos)
+patool>=4.0.0                    # Manejo de archivos comprimidos (RAR, 7z, etc.)
+yara-python>=4.5.0               # Motor de reglas YARA (detección personalizada)
+
+# --- Cliente-servidor (FastAPI) ---
+httpx>=0.27.0                    # Cliente HTTP asíncrono
+fastapi>=0.104.0                 # Framework para API REST
+uvicorn[standard]>=0.24.0        # Servidor ASGI con soporte WebSockets
+
+# --- Interfaz gráfica (GUI) ---
+PyQt6>=6.5.0                     # Framework Qt para GUI
+qdarkstyle>=3.2.0                # Tema oscuro moderno para PyQt6
+
+# --- Opcionales (para desarrollo) ---
+# pyinstaller>=6.0.0             # Para empaquetar la aplicación (opcional)
+# pytest>=7.0.0                  # Para pruebas unitarias (opcional)
