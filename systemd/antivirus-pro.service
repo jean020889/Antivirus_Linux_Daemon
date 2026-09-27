@@ -1,0 +1,24 @@
+[Unit]
+Description=Antivirus Pro - Suite de Seguridad para Linux
+After=network-online.target clamav-freshclam.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/antivirus-pro
+ExecStartPre=/usr/bin/freshclam --quiet
+ExecStart=/usr/bin/python3 /opt/antivirus-pro/antivirus.py --daemon
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+# Capabilities necesarias
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/antivirus_cuarentena /var/log/antivirus-pro
+
+[Install]
+WantedBy=multi-user.target

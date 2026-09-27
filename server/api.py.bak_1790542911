@@ -1,0 +1,267 @@
+# server/api.py
+"""
+API central para gestión multi-endpoint del Antivirus Pro.
+Requiere PostgreSQL. Ejecutar con: uvicorn server.api:app --host 0.0.0.0 --port 8000
+"""
+
+from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+import os
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+    print("[!] psycopg2 no instalado. Instala con: pip install psycopg2-binary")
+
+app = FastAPI(title="Antivirus Pro - Servidor Central")
+
+# Configuración desde variables de entorno
+DB_HOST = os.environ.get("AV_DB_HOST", "localhost")
+DB_PORT = os.environ.get("AV_DB_PORT", "5432")
+DB_NAME = os.environ.get("AV_DB_NAME", "antivirus_pro")
+DB_USER = os.environ.get("AV_DB_USER", "antivirus")
+DB_PASS = os.environ.get("AV_DB_PASS", "changeme")
+API_KEY = os.environ.get("AV_API_KEY", "CAMBIA_ESTO_POR_UNA_API_KEY")
+
+
+# ============================================
+# MODELOS PYDANTIC
+# ============================================
+
+class EndpointHeartbeat(BaseModel):
+    hostname: str
+    ip_address: Optional[str] = None
+    os_version: Optional[str] = None
+    agent_version: Optional[str] = None
+    status: str = "active"
+
+
+class ThreatReport(BaseModel):
+    hostname: str
+    file_path: str
+    threat_name: str
+    detection_type: str  # clamav, yara, heuristic, cti
+    severity: str = "medium"  # low, medium, high, critical
+    quarantined: bool = False
+
+
+# ============================================
+# CONEXIÓN A BASE DE DATOS
+# ============================================
+
+def get_db():
+    """Dependency para obtener conexión a PostgreSQL."""
+    if not HAS_POSTGRES:
+        raise HTTPException(status_code=500, detail="PostgreSQL no disponible")
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, database=DB_NAME,
+            user=DB_USER, password=DB_PASS, cursor_factory=RealDictCursor
+        )
+        yield conn
+        conn.close()
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Error DB: {e}")
+
+
+def verify_api_key(authorization: str = Header(None)):
+    """Verifica el API key en cada petición."""
+    if authorization != f"Bearer {API_KEY}":
+        raise HTTPException(status_code=401, detail="API key inválida")
+    return True
+
+
+# ============================================
+# ENDPOINTS
+# ============================================
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Antivirus Pro - Servidor Central",
+        "version": "2.0.0",
+        "status": "running",
+        "postgres": HAS_POSTGRES
+    }
+
+
+@app.post("/api/endpoints/heartbeat", dependencies=[Depends(verify_api_key)])
+async def endpoint_heartbeat(data: EndpointHeartbeat, db=Depends(get_db)):
+    """Registra o actualiza un endpoint."""
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO endpoints (hostname, ip_address, os_version, agent_version, last_seen, status)
+        VALUES (%s, %s, %s, %s, NOW(), %s)
+        ON CONFLICT (hostname) DO UPDATE SET
+            ip_address = EXCLUDED.ip_address,
+            os_version = EXCLUDED.os_version,
+            agent_version = EXCLUDED.agent_version,
+            last_seen = NOW(),
+            status = EXCLUDED.status
+        RETURNING id
+    """, (data.hostname, data.ip_address, data.os_version,
+          data.agent_version, data.status))
+    endpoint_id = cur.fetchone()['id']
+    db.commit()
+    return {"status": "ok", "endpoint_id": endpoint_id}
+
+
+@app.post("/api/threats/report", dependencies=[Depends(verify_api_key)])
+async def report_threat(data: ThreatReport, db=Depends(get_db)):
+    """Registra una amenaza detectada por un endpoint."""
+    cur = db.cursor()
+    # Buscar el endpoint
+    cur.execute("SELECT id FROM endpoints WHERE hostname = %s", (data.hostname,))
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Endpoint no registrado")
+
+    endpoint_id = row['id']
+
+    # Insertar amenaza
+    cur.execute("""
+        INSERT INTO threats (endpoint_id, file_path, threat_name,
+                             detection_type, severity, quarantined)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (endpoint_id, data.file_path, data.threat_name,
+          data.detection_type, data.severity, data.quarantined))
+    threat_id = cur.fetchone()['id']
+    db.commit()
+    return {"status": "ok", "threat_id": threat_id}
+
+
+@app.get("/api/endpoints", dependencies=[Depends(verify_api_key)])
+async def list_endpoints(db=Depends(get_db)):
+    """Lista todos los endpoints registrados."""
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, hostname, ip_address, os_version, agent_version,
+               last_seen, status
+        FROM endpoints ORDER BY last_seen DESC
+    """)
+    return cur.fetchall()
+
+
+@app.get("/api/threats", dependencies=[Depends(verify_api_key)])
+async def list_threats(limit: int = 100, db=Depends(get_db)):
+    """Lista las amenazas detectadas (últimas N)."""
+    cur = db.cursor()
+    cur.execute("""
+        SELECT t.id, t.detected_at, e.hostname, t.file_path,
+               t.threat_name, t.detection_type, t.severity, t.quarantined
+        FROM threats t
+        JOIN endpoints e ON t.endpoint_id = e.id
+        ORDER BY t.detected_at DESC
+        LIMIT %s
+    """, (limit,))
+    return cur.fetchall()
+
+
+@app.get("/api/scans", dependencies=[Depends(verify_api_key)])
+async def list_scans(limit: int = 50, db=Depends(get_db)):
+    """Lista los escaneos realizados."""
+    cur = db.cursor()
+    cur.execute("""
+        SELECT s.id, e.hostname, s.scan_type, s.started_at,
+               s.finished_at, s.files_scanned, s.threats_found, s.status
+        FROM scans s
+        JOIN endpoints e ON s.endpoint_id = e.id
+        ORDER BY s.started_at DESC
+        LIMIT %s
+    """, (limit,))
+    return cur.fetchall()
+
+
+@app.get("/api/stats", dependencies=[Depends(verify_api_key)])
+async def get_stats(db=Depends(get_db)):
+    """Estadísticas globales."""
+    cur = db.cursor()
+    cur.execute("SELECT COUNT(*) as total FROM endpoints WHERE status = 'active'")
+    endpoints = cur.fetchone()['total']
+
+    cur.execute("SELECT COUNT(*) as total FROM threats")
+    threats = cur.fetchone()['total']
+
+    cur.execute("""
+        SELECT severity, COUNT(*) as count
+        FROM threats GROUP BY severity
+    """)
+    by_severity = {row['severity']: row['count'] for row in cur.fetchall()}
+
+    cur.execute("""
+        SELECT detection_type, COUNT(*) as count
+        FROM threats GROUP BY detection_type
+    """)
+    by_type = {row['detection_type']: row['count'] for row in cur.fetchall()}
+
+    return {
+        "active_endpoints": endpoints,
+        "total_threats": threats,
+        "threats_by_severity": by_severity,
+        "threats_by_detection_type": by_type
+    }
+
+
+# ============================================
+# ESQUEMA SQL (ejecutar una vez)
+# ============================================
+
+SQL_SCHEMA = """
+-- Ejecutar en PostgreSQL para inicializar el esquema:
+-- psql -U antivirus -d antivirus_pro -f schema.sql
+
+CREATE TABLE IF NOT EXISTS endpoints (
+    id SERIAL PRIMARY KEY,
+    hostname VARCHAR(255) UNIQUE NOT NULL,
+    ip_address INET,
+    os_version VARCHAR(100),
+    agent_version VARCHAR(20),
+    last_seen TIMESTAMP DEFAULT NOW(),
+    status VARCHAR(20) DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS scans (
+    id SERIAL PRIMARY KEY,
+    endpoint_id INTEGER REFERENCES endpoints(id),
+    scan_type VARCHAR(50),
+    started_at TIMESTAMP DEFAULT NOW(),
+    finished_at TIMESTAMP,
+    files_scanned INTEGER DEFAULT 0,
+    threats_found INTEGER DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS threats (
+    id SERIAL PRIMARY KEY,
+    scan_id INTEGER REFERENCES scans(id),
+    endpoint_id INTEGER REFERENCES endpoints(id),
+    file_path TEXT NOT NULL,
+    threat_name VARCHAR(255),
+    detection_type VARCHAR(50),
+    severity VARCHAR(20),
+    quarantined BOOLEAN DEFAULT FALSE,
+    detected_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_threats_endpoint ON threats(endpoint_id);
+CREATE INDEX IF NOT EXISTS idx_threats_detected ON threats(detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scans_endpoint ON scans(endpoint_id);
+"""
+
+
+@app.get("/api/schema", response_class=HTMLResponse)
+async def get_schema():
+    """Devuelve el esquema SQL para inicializar la base de datos."""
+    return f"<pre>{SQL_SCHEMA}</pre>"
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

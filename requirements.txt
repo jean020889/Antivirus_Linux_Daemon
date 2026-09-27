@@ -1,0 +1,26 @@
+# Core
+apscheduler>=3.10.0
+psutil>=5.9.0
+watchdog>=3.0.0
+python-magic>=0.4.27
+patool>=1.12
+requests>=2.31.0
+
+# YARA
+yara-python>=4.3.0
+
+# Dashboard web
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# GUI (v2.0)
+PyQt6>=6.5.0
+
+# Base de datos (v2.0)
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-qt>=4.2.0
+pyclamd>=0.4.0

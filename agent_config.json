@@ -1,0 +1,8 @@
+{
+  "server_url": "http://localhost:8002",
+  "api_key": "test_key",
+  "heartbeat_interval": 60,
+  "telemetry_interval": 30,
+  "scan_interval": 3600,
+  "scan_paths": ["/tmp", "/var/tmp", "/home"]
+}

@@ -1,0 +1,219 @@
+# core/scanner.py
+import os, sys, hashlib, re, subprocess, time
+from datetime import datetime
+from pathlib import Path
+
+class Colors:
+    RED = '\033[91m'; GREEN = '\033[92m'; YELLOW = '\033[93m'
+    BLUE = '\033[94m'; RESET = '\033[0m'; BOLD = '\033[1m'
+
+class ScannerEngine:
+    def __init__(self, config):
+        self.config = config
+        self.firmas_md5 = set()
+        self.firmas_sha1 = set()
+        self.firmas_sha256 = set()
+        self.firmas_hex = []
+        self.total_firmas = 0
+        self.cuarentena = config.get('cuarentena', '/opt/av_cuarentena')
+        os.makedirs(self.cuarentena, exist_ok=True)
+
+        # Motores opcionales (se cargan si están disponibles)
+        self.yara = None
+        self.cti = None
+        try:
+            from .yara_engine import YaraEngine
+            self.yara = YaraEngine(
+                rules_dir=config.get('yara_rules_dir', './yara_rules'),
+                cache_dir=config.get('cti_cache_dir', './cti_cache')
+            )
+        except ImportError:
+            print(f"{Colors.YELLOW}[!] YaraEngine no disponible{Colors.RESET}")
+
+        try:
+            from .cti_abuse import AbuseCHIntel
+            auth_key = config.get('abuse_ch_key')
+            if auth_key and auth_key != "TU_AUTH_KEY_AQUI":
+                self.cti = AbuseCHIntel(
+                    auth_key=auth_key,
+                    cache_dir=config.get('cti_cache_dir', './cti_cache'),
+                    cache_ttl_hours=config.get('cti_cache_ttl_hours', 24)
+                )
+                self.cti.update()
+        except ImportError:
+            print(f"{Colors.YELLOW}[!] CTI abuse.ch no disponible{Colors.RESET}")
+
+        self.load_clamav_signatures()
+
+    def load_clamav_signatures(self):
+        clam_paths = ["/var/lib/clamav/unpacked", "/var/lib/clamav", "/usr/local/share/clamav"]
+        for base in clam_paths:
+            if os.path.exists(base):
+                self._parse_hdb(Path(base).glob("*.hdb"))
+                self._parse_hdb(Path(base).glob("*.hdu"))
+                self._parse_hdb(Path(base).glob("*.hsb"))
+                self._parse_ndb(Path(base).glob("*.ndb"))
+                self._parse_ndb(Path(base).glob("*.ndu"))
+                break
+        print(f"{Colors.BLUE}[+] Cargadas {self.total_firmas} firmas ({len(self.firmas_md5)} MD5, {len(self.firmas_sha1)} SHA1, {len(self.firmas_sha256)} SHA256, {len(self.firmas_hex)} HEX).{Colors.RESET}")
+
+    def _parse_hdb(self, files):
+        for f in files:
+            try:
+                with open(f, 'r', errors='ignore') as fd:
+                    for line in fd:
+                        if ':' in line and not line.startswith('#'):
+                            h = line.split(':')[0].lower()
+                            if len(h) == 32: self.firmas_md5.add(h)
+                            elif len(h) == 40: self.firmas_sha1.add(h)
+                            elif len(h) == 64: self.firmas_sha256.add(h)
+                            self.total_firmas += 1
+                            if self.total_firmas > self.config.get('max_firmas', 300000):
+                                return
+            except: pass
+
+    def _parse_ndb(self, files):
+        for f in files:
+            try:
+                with open(f, 'r', errors='ignore') as fd:
+                    for line in fd:
+                        parts = line.split(':')
+                        if len(parts) >= 4:
+                            hex_str = parts[3].split('*')[0]
+                            try:
+                                self.firmas_hex.append(bytes.fromhex(hex_str))
+                                self.total_firmas += 1
+                                if self.total_firmas > self.config.get('max_firmas', 300000):
+                                    return
+                            except: pass
+            except: pass
+
+    def get_hash(self, data_or_path, algo='md5'):
+        hash_obj = hashlib.new(algo)
+        if isinstance(data_or_path, bytes):
+            hash_obj.update(data_or_path)
+            return hash_obj.hexdigest()
+        try:
+            with open(data_or_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(8192), b''):
+                    hash_obj.update(chunk)
+            return hash_obj.hexdigest()
+        except: return None
+
+    def scan_bytes(self, data):
+        if not data: return False, "Sin datos"
+        h = hashlib.md5(data).hexdigest()
+        if h in self.firmas_md5: return True, f"MD5 en memoria: {h}"
+        for sig in self.firmas_hex:
+            if sig in data: return True, "Firma NDB en memoria"
+        if self.yara:
+            infectado, motivo = self.yara.scan_bytes(data)
+            if infectado: return True, motivo
+        return False, "Limpio"
+
+    def scan_file(self, filepath):
+        # 1. Hashes ClamAV
+        for alg, set_f in [('md5', self.firmas_md5),
+                           ('sha1', self.firmas_sha1),
+                           ('sha256', self.firmas_sha256)]:
+            h = self.get_hash(filepath, alg)
+            if h and h in set_f:
+                return True, f"Firma ClamAV {alg.upper()}"
+
+        # 2. CTI abuse.ch
+        if self.cti:
+            for alg in ['md5', 'sha256']:
+                h = self.get_hash(filepath, alg)
+                if h and self.cti.check_hash(h):
+                    return True, f"CTI abuse.ch {alg.upper()}: {h}"
+
+        # 3. Cadenas NDB de ClamAV (DESHABILITADO temporalmente - genera falsos positivos)
+        # TODO: Implementar parser NDB correcto con offsets, target types y máscaras
+        # try:
+        #     with open(filepath, 'rb') as f:
+        #         data = f.read(4194304)
+        #         for sig in self.firmas_hex:
+        #             if sig in data:
+        #                 return True, "Firma NDB ClamAV"
+        # except: pass
+
+        # 4. YARA
+        if self.yara:
+            infectado, motivo = self.yara.scan_file(filepath)
+            if infectado: return True, motivo
+
+        # 5. Heurística
+        return self.heuristic_scan(filepath)
+
+    def heuristic_scan(self, filepath):
+        try:
+            st = os.stat(filepath)
+            if st.st_mode & 0o4000: return True, "SETUID Rootkit"
+            if st.st_mode & 0o2000: return True, "SETGID Rootkit"
+
+            with open(filepath, 'rb') as f:
+                if f.read(4) == b'\x7fELF':
+                    if any(x in filepath for x in ['/tmp/', '/dev/shm/', '/var/tmp/']):
+                        return True, "ELF en carpeta temporal"
+
+            if filepath.endswith(('.py','.sh','.pl','.js')):
+                with open(filepath, 'r', errors='ignore') as f:
+                    txt = f.read(4096)
+                    if re.search(r'eval\s*\(|base64\s*-d|rm\s+-rf\s+/\s*;', txt):
+                        return True, "Script ofuscado"
+        except: pass
+        return False, "Limpio"
+
+    def quarantine(self, filepath, motivo):
+        """Mueve un archivo malicioso a cuarentena.
+        Retorna la ruta destino si tuvo éxito, None si falló.
+        NUNCA retorna una ruta si el archivo no se movió."""
+        import shutil
+        timestamp = int(time.time())
+        name = os.path.basename(filepath)
+        dest = os.path.join(self.cuarentena, f"{timestamp}_{name}")
+
+        # Verificar que el archivo origen existe
+        if not os.path.exists(filepath):
+            print(f"{Colors.YELLOW}[!] Archivo ya no existe: {filepath}{Colors.RESET}")
+            return None
+
+        # Verificar que la cuarentena es escribible
+        if not os.access(self.cuarentena, os.W_OK):
+            print(f"{Colors.RED}[!] Cuarentena no escribible: {self.cuarentena}{Colors.RESET}")
+            return None
+
+        try:
+            # Intentar rename (mismo sistema de archivos = instantáneo)
+            os.rename(filepath, dest)
+        except OSError:
+            # Si falla (diferente FS o permisos), intentar copy+delete
+            try:
+                shutil.copy2(filepath, dest)
+                os.remove(filepath)
+            except Exception as e:
+                print(f"{Colors.RED}[!] Error moviendo a cuarentena: {e}{Colors.RESET}")
+                return None
+
+        # Verificar que REALMENTE se movió
+        if not os.path.exists(dest):
+            print(f"{Colors.RED}[!] El archivo no está en la cuarentena tras moverlo{Colors.RESET}")
+            return None
+
+        # Aplicar permisos restrictivos
+        try:
+            os.chmod(dest, 0o600)
+        except Exception:
+            pass
+
+        # Escribir log acompañante
+        try:
+            with open(f"{dest}.log", 'w') as log:
+                log.write(f"Origen: {filepath}\n")
+                log.write(f"Motivo: {motivo}\n")
+                log.write(f"Fecha: {datetime.now()}\n")
+                log.write(f"Tamaño: {os.path.getsize(dest)} bytes\n")
+        except Exception:
+            pass
+
+        return dest

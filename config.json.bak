@@ -1,0 +1,26 @@
+{
+  "cuarentena": "/opt/antivirus_cuarentena",
+  "logs": "./logs",
+  "max_firmas": 300000,
+  "full_scan_hour": "03:00",
+  "folder_scan": {
+    "ruta": "/home/usuario/Descargas",
+    "hora": "14:30"
+  },
+  "realtime_dirs": ["/home", "/tmp", "/var/tmp"],
+  "scan_archives": true,
+  "temp_extract": "/tmp/av_extract",
+  "abuse_ch_key": "TU_AUTH_KEY_AQUI",
+  "yara_rules_dir": "./yara_rules",
+  "cti_cache_dir": "./cti_cache",
+  "cti_cache_ttl_hours": 24,
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "api_token": "CAMBIA_ESTO_POR_UN_TOKEN_SEGURO"
+  },
+  "central_server": {
+    "url": "http://localhost:8000",
+    "api_key": "CAMBIA_ESTO_POR_UNA_API_KEY"
+  }
+}

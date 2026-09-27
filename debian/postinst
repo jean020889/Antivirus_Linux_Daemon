@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+case "$1" in
+    configure)
+        # Actualizar firmas al instalar
+        freshclam --quiet || true
+        # Habilitar servicio
+        systemctl daemon-reload || true
+        systemctl enable antivirus-pro.service || true
+    ;;
+esac
+exit 0

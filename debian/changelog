@@ -1,0 +1,7 @@
+antivirus-pro (1.2.0) unstable; urgency=medium
+
+  * Integracion de reglas YARA comunitarias
+  * CTI con abuse.ch (URLhaus + ThreatFox)
+  * Firma GPG del paquete
+
+ -- Tu Nombre <seguridad@tudominio.com>  Sat, 27 Sep 2026 00:00:00 +0000

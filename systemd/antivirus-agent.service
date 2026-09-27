@@ -1,0 +1,28 @@
+[Unit]
+Description=Antivirus Pro EDR - Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/antivirus-pro
+
+Environment="PATH=/opt/antivirus-pro/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/opt/antivirus-pro"
+Environment="PYTHONUNBUFFERED=1"
+
+ExecStart=/opt/antivirus-pro/venv/bin/python3 /opt/antivirus-pro/agent/edr_agent.py /opt/antivirus-pro/agent_config.json
+
+Restart=on-failure
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=antivirus-agent
+
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

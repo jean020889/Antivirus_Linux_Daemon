@@ -1,0 +1,137 @@
+# core/realtime.py
+"""
+Vigilancia en tiempo real usando watchdog (compatible con Python 3.12+).
+Reemplaza a pyinotify que fue deprecado.
+"""
+
+import os
+import time
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+from .archives import ArchiveScanner
+
+
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+
+class AntivirusEventHandler(FileSystemEventHandler):
+    """Manejador de eventos para watchdog."""
+
+    def __init__(self, engine, archive_scanner):
+        super().__init__()
+        self.engine = engine
+        self.archive_scanner = archive_scanner
+        self._recently_scanned = {}  # Debounce para evitar escaneos duplicados
+        self._debounce_seconds = 2
+
+    def _should_scan(self, path):
+        """Evita escanear el mismo archivo múltiples veces en poco tiempo."""
+        now = time.time()
+        last = self._recently_scanned.get(path, 0)
+        if now - last < self._debounce_seconds:
+            return False
+        self._recently_scanned[path] = now
+        # Limpiar entradas viejas
+        if len(self._recently_scanned) > 10000:
+            cutoff = now - 60
+            self._recently_scanned = {
+                k: v for k, v in self._recently_scanned.items() if v > cutoff
+            }
+        return True
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self._scan(event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self._scan(event.src_path)
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            self._scan(event.dest_path)
+
+    def _scan(self, path):
+        if not os.path.isfile(path) or os.path.islink(path):
+            return
+        if not self._should_scan(path):
+            return
+
+        try:
+            infected, motivo = self.engine.scan_file(path)
+            if infected:
+                print(f"{Colors.RED}🔥 [REAL-TIME] Amenaza en {path}{Colors.RESET}")
+                print(f"{Colors.YELLOW}   └─ {motivo}{Colors.RESET}")
+                self.engine.quarantine(path, motivo)
+                print(f"{Colors.GREEN}   └─ ✅ Aislado en cuarentena{Colors.RESET}")
+            elif self.archive_scanner:
+                # Si es un comprimido, analizarlo también
+                is_inf, arch_motivo = self.archive_scanner.extract_and_scan(path)
+                if is_inf:
+                    self.engine.quarantine(path, f"Comprimido malicioso: {arch_motivo}")
+        except Exception as e:
+            pass  # Silencioso para no saturar la salida en tiempo real
+
+
+class RealtimeMonitor:
+    """Monitor de tiempo real usando watchdog."""
+
+    def __init__(self, engine, config):
+        self.engine = engine
+        self.config = config
+        self.observer = None
+        self.event_handler = None
+        self._running = False
+
+    def start(self):
+        """Inicia la vigilancia en tiempo real (bloqueante)."""
+        dirs = self.config.get('realtime_dirs', ['/home', '/tmp'])
+
+        self.event_handler = AntivirusEventHandler(
+            self.engine,
+            ArchiveScanner(self.engine, self.config.get('temp_extract', '/tmp/av_extract'))
+        )
+
+        self.observer = Observer()
+
+        watching = 0
+        for d in dirs:
+            if os.path.exists(d) and os.path.isdir(d):
+                try:
+                    self.observer.schedule(self.event_handler, d, recursive=True)
+                    print(f"{Colors.GREEN}[+] Vigilando: {d}{Colors.RESET}")
+                    watching += 1
+                except Exception as e:
+                    print(f"{Colors.YELLOW}[!] No se pudo vigilar {d}: {e}{Colors.RESET}")
+
+        if watching == 0:
+            print(f"{Colors.YELLOW}[!] No hay directorios válidos para vigilar{Colors.RESET}")
+            return
+
+        self.observer.start()
+        self._running = True
+        print(f"{Colors.GREEN}[+] Vigilancia en tiempo real activa ({watching} directorios){Colors.RESET}")
+
+        try:
+            while self._running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
+
+    def stop(self):
+        """Detiene la vigilancia."""
+        self._running = False
+        if self.observer:
+            try:
+                self.observer.stop()
+                self.observer.join(timeout=5)
+                print(f"{Colors.GREEN}[+] Vigilancia detenida{Colors.RESET}")
+            except Exception:
+                pass

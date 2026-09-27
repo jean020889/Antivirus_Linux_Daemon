@@ -1,0 +1,79 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: edr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: antivirus
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: antivirus_pro
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antivirus -d antivirus_pro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  antivirus:
+    build: .
+    container_name: edr-daemon
+    restart: unless-stopped
+    command: daemon
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - quarantine_data:/opt/antivirus_cuarentena
+      - yara_rules:/app/yara_rules
+      - sigma_rules:/app/sigma_rules
+    environment:
+      AV_DB_HOST: postgres
+      AV_DB_PORT: 5432
+      AV_DB_NAME: antivirus_pro
+      AV_DB_USER: antivirus
+      AV_DB_PASS: changeme
+    cap_add:
+      - SYS_PTRACE
+      - DAC_READ_SEARCH
+      - DAC_OVERRIDE
+
+  api:
+    build: .
+    container_name: edr-api
+    restart: unless-stopped
+    command: api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+    environment:
+      AV_DB_HOST: postgres
+      AV_DB_PORT: 5432
+      AV_DB_NAME: antivirus_pro
+      AV_DB_USER: antivirus
+      AV_DB_PASS: changeme
+      AV_API_KEY: CAMBIA_ESTO_POR_UNA_API_KEY_SEGURA
+
+  dashboard:
+    build: .
+    container_name: edr-dashboard
+    restart: unless-stopped
+    command: dashboard
+    ports:
+      - "8081:8081"
+    environment:
+      AV_API_TOKEN: CAMBIA_ESTO_POR_UN_TOKEN_SEGURO
+
+volumes:
+  postgres_data:
+  quarantine_data:
+  yara_rules:
+  sigma_rules:
