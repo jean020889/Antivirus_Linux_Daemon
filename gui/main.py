@@ -15,6 +15,12 @@ from core.behavior_monitor import BehaviorMonitor
 from core.alert_system import AlertSystem
 from core.zt_health import ZTHealthAttestation
 from core.threat_store import ThreatStore
+try:
+    from core.cti_feed import CTIClient
+    HAVE_CTI = True
+except ImportError:
+    CTIClient = None
+    HAVE_CTI = False
 
 # ========== WORKERS ==========
 class ScanWorker(QObject):
@@ -95,6 +101,14 @@ class AntivirusGUI(QMainWindow):
         self.threat_store = ThreatStore(self.config.get("threat_store_db"))
         self.zt = ZTHealthAttestation(self.engine, self.threat_store, self.config)
 
+        # CTI: cliente de feeds STIX/TAXII
+        self.cti = None
+        if HAVE_CTI:
+            try:
+                self.cti = CTIClient(self.config.get("cti_feeds"))
+            except Exception as e:
+                print(f"[!] CTIClient no inicializado: {e}")
+
         self._initUI()
         self._start_behavior_monitor()
 
@@ -163,6 +177,8 @@ class AntivirusGUI(QMainWindow):
         self.tab_network = QWidget()
         self.tab_alerts = QWidget()  # NUEVA: pestaña de alertas
         self.tab_zt = QWidget()      # NUEVA: pestaña Zero Trust
+        self.tab_forensic = QWidget() # NUEVA: pestaña Forense
+        self.tab_iocs = QWidget()     # NUEVA: pestaña IOCs
         self.tab_logs = QWidget()
 
         self.tabs.addTab(self.tab_dashboard, "📊 Dashboard")
@@ -173,6 +189,8 @@ class AntivirusGUI(QMainWindow):
         self.tabs.addTab(self.tab_network, "🌐 Red")
         self.tabs.addTab(self.tab_alerts, "🚨 Alertas")
         self.tabs.addTab(self.tab_zt, "🛡️ Zero Trust")
+        self.tabs.addTab(self.tab_forensic, "🔎 Forense")
+        self.tabs.addTab(self.tab_iocs, "🌐 IOCs")
         self.tabs.addTab(self.tab_logs, "📜 Logs")
         main_layout.addWidget(self.tabs)
 
@@ -184,6 +202,8 @@ class AntivirusGUI(QMainWindow):
         self._init_network()
         self._init_alerts()  # NUEVO
         self._init_zt()      # NUEVO: pestaña Zero Trust
+        self._init_forensic() # NUEVO: pestaña Forense
+        self._init_iocs()     # NUEVO: pestaña IOCs
         self._init_logs()
 
         self.statusBar().showMessage("Listo")
@@ -803,6 +823,291 @@ class AntivirusGUI(QMainWindow):
         self.zt_table.setItem(meta_row, 1, QTableWidgetItem(snapshot.get("hostname", "—")))
         self.zt_table.setItem(meta_row, 2, QTableWidgetItem(snapshot.get("kernel", "—")))
 
+    # ========== FORENSE ==========
+    def _init_forensic(self):
+        """Pestaña de búsqueda forense sobre el threat_store."""
+        layout = QVBoxLayout(self.tab_forensic)
+
+        # Cabecera con estadísticas
+        header = QHBoxLayout()
+        self.forensic_count_label = QLabel("Eventos totales: —")
+        self.forensic_count_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #00ffcc;")
+        header.addWidget(self.forensic_count_label)
+        header.addStretch()
+
+        self.forensic_refresh_btn = QPushButton("🔄 Refrescar")
+        self.forensic_refresh_btn.clicked.connect(self._refresh_forensic)
+        self.forensic_refresh_btn.setStyleSheet("background:#2a5a7a;padding:8px;border-radius:6px;")
+        header.addWidget(self.forensic_refresh_btn)
+        layout.addLayout(header)
+
+        # Filtros
+        filters = QHBoxLayout()
+
+        filters.addWidget(QLabel("Path:"))
+        self.forensic_path_input = QLineEdit()
+        self.forensic_path_input.setPlaceholderText("/etc/shadow, /tmp, ...")
+        self.forensic_path_input.setStyleSheet("padding: 6px;")
+        filters.addWidget(self.forensic_path_input, 2)
+
+        filters.addWidget(QLabel("PID:"))
+        self.forensic_pid_input = QLineEdit()
+        self.forensic_pid_input.setPlaceholderText("1234")
+        self.forensic_pid_input.setMaximumWidth(100)
+        self.forensic_pid_input.setStyleSheet("padding: 6px;")
+        filters.addWidget(self.forensic_pid_input)
+
+        filters.addWidget(QLabel("Severidad:"))
+        self.forensic_sev_combo = QComboBox()
+        self.forensic_sev_combo.addItems(["(todas)", "critical", "high", "medium", "low"])
+        filters.addWidget(self.forensic_sev_combo)
+
+        filters.addWidget(QLabel("Rango:"))
+        self.forensic_range_combo = QComboBox()
+        self.forensic_range_combo.addItems(["Última hora", "Últimas 24h", "Últimos 7 días", "Todo"])
+        self.forensic_range_combo.setCurrentIndex(1)
+        filters.addWidget(self.forensic_range_combo)
+
+        self.forensic_search_btn = QPushButton("🔍 Buscar")
+        self.forensic_search_btn.clicked.connect(self._refresh_forensic)
+        self.forensic_search_btn.setStyleSheet("background:#3a7a5a;padding:8px;border-radius:6px;font-weight:bold;")
+        filters.addWidget(self.forensic_search_btn)
+
+        layout.addLayout(filters)
+
+        # Tabla de resultados
+        self.forensic_table = QTableWidget()
+        self.forensic_table.setColumnCount(6)
+        self.forensic_table.setHorizontalHeaderLabels([
+            "Timestamp", "Origen", "Tipo", "PID", "Path", "Severidad"
+        ])
+        self.forensic_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.forensic_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.forensic_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        layout.addWidget(self.forensic_table)
+
+        info = QLabel(
+            "Búsqueda forense sobre el almacén de eventos (SQLite). "
+            "Permite investigar qué procesos, archivos o conexiones fueron registrados "
+            "por el motor de telemetría y las reglas Sigma."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #888; padding: 8px; font-style: italic;")
+        layout.addWidget(info)
+
+    def _refresh_forensic(self):
+        """Ejecuta la búsqueda forense en un worker."""
+        self.forensic_refresh_btn.setEnabled(False)
+        self.forensic_search_btn.setEnabled(False)
+
+        # Calcular since_seconds según el rango
+        range_idx = self.forensic_range_combo.currentIndex()
+        since_seconds = {0: 3600, 1: 86400, 2: 604800, 3: 10**9}[range_idx]
+
+        # Recolectar filtros
+        path_filter = self.forensic_path_input.text().strip()
+        pid_str = self.forensic_pid_input.text().strip()
+        sev_filter = self.forensic_sev_combo.currentText()
+
+        pid = None
+        if pid_str.isdigit():
+            pid = int(pid_str)
+
+        self.forensic_thread = QThread()
+        self.forensic_worker = ForensicWorker(
+            self.threat_store,
+            path=path_filter or None,
+            pid=pid,
+            severity=None if sev_filter == "(todas)" else sev_filter,
+            since_seconds=since_seconds,
+        )
+        self.forensic_worker.moveToThread(self.forensic_thread)
+        self.forensic_worker.finished.connect(self._forensic_finished)
+        self.forensic_worker.finished.connect(self.forensic_thread.quit)
+        self.forensic_worker.finished.connect(self.forensic_worker.deleteLater)
+        self.forensic_thread.finished.connect(self.forensic_thread.deleteLater)
+        self.forensic_thread.started.connect(self.forensic_worker.run)
+        self.forensic_thread.start()
+
+    def _forensic_finished(self, result):
+        self.forensic_refresh_btn.setEnabled(True)
+        self.forensic_search_btn.setEnabled(True)
+
+        if isinstance(result, Exception):
+            QMessageBox.critical(self, "Error", f"Búsqueda forense falló: {result}")
+            return
+
+        rows = result
+        self.forensic_table.setRowCount(len(rows))
+
+        for i, row in enumerate(rows):
+            # row: (ts, source, event_type, pid, path, severity, rule_title)
+            ts, source, event_type, pid, path, severity, rule_title = row
+
+            # Formatear timestamp
+            import datetime as _dt
+            ts_str = _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+            self.forensic_table.setItem(i, 0, QTableWidgetItem(ts_str))
+            self.forensic_table.setItem(i, 1, QTableWidgetItem(str(source or "")))
+            self.forensic_table.setItem(i, 2, QTableWidgetItem(str(event_type or "")))
+            self.forensic_table.setItem(i, 3, QTableWidgetItem(str(pid if pid is not None else "")))
+            self.forensic_table.setItem(i, 4, QTableWidgetItem(str(path or "")))
+
+            sev_item = QTableWidgetItem(str(severity or ""))
+            if severity == "critical":
+                sev_item.setForeground(Qt.GlobalColor.red)
+            elif severity == "high":
+                sev_item.setForeground(Qt.GlobalColor.yellow)
+            self.forensic_table.setItem(i, 5, sev_item)
+
+        self.forensic_count_label.setText(f"Eventos mostrados: {len(rows)}")
+
+    # ========== IOCs (Indicators of Compromise) ==========
+    def _init_iocs(self):
+        """Pestaña de visualización de IOCs cargados desde feeds CTI."""
+        layout = QVBoxLayout(self.tab_iocs)
+
+        # Cabecera con contadores
+        header = QHBoxLayout()
+        self.iocs_count_label = QLabel("IOCs cargados: —")
+        self.iocs_count_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #00ffcc;")
+        header.addWidget(self.iocs_count_label)
+        header.addStretch()
+
+        self.iocs_update_btn = QPushButton("🌐 Actualizar desde CTI")
+        self.iocs_update_btn.clicked.connect(self._update_cti)
+        self.iocs_update_btn.setStyleSheet("background:#2a5a7a;padding:8px;border-radius:6px;font-weight:bold;")
+        header.addWidget(self.iocs_update_btn)
+
+        self.iocs_refresh_btn = QPushButton("🔄 Refrescar")
+        self.iocs_refresh_btn.clicked.connect(self._refresh_iocs)
+        self.iocs_refresh_btn.setStyleSheet("background:#3a5a7a;padding:8px;border-radius:6px;")
+        header.addWidget(self.iocs_refresh_btn)
+        layout.addLayout(header)
+
+        # Selector de tipo
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Tipo:"))
+        self.iocs_type_combo = QComboBox()
+        self.iocs_type_combo.addItems(["IPs maliciosas", "Dominios maliciosos", "Hashes SHA-256", "URLs maliciosas"])
+        self.iocs_type_combo.currentIndexChanged.connect(self._refresh_iocs)
+        type_layout.addWidget(self.iocs_type_combo, 2)
+
+        type_layout.addWidget(QLabel("Buscar:"))
+        self.iocs_search_input = QLineEdit()
+        self.iocs_search_input.setPlaceholderText("Filtrar por valor...")
+        self.iocs_search_input.textChanged.connect(self._refresh_iocs)
+        self.iocs_search_input.setStyleSheet("padding: 6px;")
+        type_layout.addWidget(self.iocs_search_input, 3)
+
+        layout.addLayout(type_layout)
+
+        # Tabla
+        self.iocs_table = QTableWidget()
+        self.iocs_table.setColumnCount(1)
+        self.iocs_table.setHorizontalHeaderLabels(["Valor"])
+        self.iocs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.iocs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.iocs_table)
+
+        # Info si CTI no está disponible
+        if not HAVE_CTI:
+            info = QLabel(
+                "⚠️ El módulo CTI no está instalado. Para habilitarlo, ejecuta:\n"
+                "    pip install --break-system-packages taxii2-client stix2\n"
+                "Y reinicia la aplicación."
+            )
+            info.setWordWrap(True)
+            info.setStyleSheet(
+                "color: #ffaa00; padding: 10px; "
+                "background: #3a2a00; border-radius: 6px;"
+            )
+            layout.addWidget(info)
+            self.iocs_update_btn.setEnabled(False)
+        else:
+            info = QLabel(
+                "Indicators of Compromise cargados desde feeds CTI STIX/TAXII. "
+                "Se usan para bloquear IPs, dominios, hashes y URLs maliciosas "
+                "durante el monitoreo en tiempo real."
+            )
+            info.setWordWrap(True)
+            info.setStyleSheet("color: #888; padding: 8px; font-style: italic;")
+            layout.addWidget(info)
+
+        # Cargar inicialmente
+        self._refresh_iocs()
+
+    def _refresh_iocs(self):
+        """Refresca la vista de IOCs (no requiere worker, es solo lectura de sets)."""
+        if self.cti is None:
+            self.iocs_count_label.setText("IOCs cargados: 0 (CTI no disponible)")
+            self.iocs_table.setRowCount(0)
+            return
+
+        try:
+            store = self.cti.store
+            tipo = self.iocs_type_combo.currentIndex()
+            search = self.iocs_search_input.text().strip().lower()
+
+            if tipo == 0:
+                items = sorted(store.ipv4)
+            elif tipo == 1:
+                items = sorted(store.domains)
+            elif tipo == 2:
+                items = sorted(store.sha256)
+            else:
+                items = sorted(store.urls)
+
+            if search:
+                items = [i for i in items if search in i.lower()]
+
+            self.iocs_table.setRowCount(len(items))
+            for i, val in enumerate(items):
+                self.iocs_table.setItem(i, 0, QTableWidgetItem(val))
+
+            total = store.total()
+            self.iocs_count_label.setText(
+                f"IOCs cargados: {total} "
+                f"(IPs: {len(store.ipv4)}, "
+                f"dominios: {len(store.domains)}, "
+                f"hashes: {len(store.sha256)}, "
+                f"URLs: {len(store.urls)})"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo refrescar IOCs: {e}")
+
+    def _update_cti(self):
+        """Actualiza los feeds CTI en un worker."""
+        if self.cti is None:
+            QMessageBox.warning(self, "CTI no disponible", "El módulo CTI no está instalado.")
+            return
+
+        self.iocs_update_btn.setEnabled(False)
+        self.iocs_update_btn.setText("⏳ Actualizando...")
+
+        self.cti_thread = QThread()
+        self.cti_worker = CTIUpdateWorker(self.cti)
+        self.cti_worker.moveToThread(self.cti_thread)
+        self.cti_worker.finished.connect(self._cti_update_finished)
+        self.cti_worker.finished.connect(self.cti_thread.quit)
+        self.cti_worker.finished.connect(self.cti_worker.deleteLater)
+        self.cti_thread.finished.connect(self.cti_thread.deleteLater)
+        self.cti_thread.started.connect(self.cti_worker.run)
+        self.cti_thread.start()
+
+    def _cti_update_finished(self, result):
+        self.iocs_update_btn.setEnabled(True)
+        self.iocs_update_btn.setText("🌐 Actualizar desde CTI")
+
+        if isinstance(result, Exception):
+            QMessageBox.critical(self, "Error CTI", f"Falló la actualización: {result}")
+            return
+
+        total = result
+        QMessageBox.information(self, "CTI actualizado", f"Se cargaron {total} IOCs en total.")
+        self._refresh_iocs()
+
     def _init_logs(self):
         layout = QVBoxLayout(self.tab_logs)
         self.log_text = QTextEdit()
@@ -916,6 +1221,67 @@ class AntivirusGUI(QMainWindow):
         self._save_config()
         event.accept()
 
+# ========== WORKER PARA ACTUALIZACIÓN CTI ==========
+class CTIUpdateWorker(QObject):
+    """Ejecuta cti.update_now() en un hilo para no bloquear la UI."""
+    finished = pyqtSignal(object)
+
+    def __init__(self, cti):
+        super().__init__()
+        self.cti = cti
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            total = self.cti.update_now()
+            self.finished.emit(total)
+        except Exception as exc:
+            self.finished.emit(exc)
+
+# ========== WORKER PARA FORENSE ==========
+class ForensicWorker(QObject):
+    """Ejecuta búsquedas forenses en SQLite desde un hilo."""
+    finished = pyqtSignal(object)
+
+    def __init__(self, store, path=None, pid=None, severity=None, since_seconds=86400):
+        super().__init__()
+        self.store = store
+        self.path = path
+        self.pid = pid
+        self.severity = severity
+        self.since_seconds = since_seconds
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            import time as _t
+            since = _t.time() - self.since_seconds
+            conditions = ["ts > ?"]
+            params = [since]
+
+            if self.path:
+                conditions.append("path LIKE ?")
+                params.append(f"%{self.path}%")
+
+            if self.pid is not None:
+                conditions.append("pid = ?")
+                params.append(self.pid)
+
+            if self.severity:
+                conditions.append("severity = ?")
+                params.append(self.severity)
+
+            where = " AND ".join(conditions)
+            sql = (
+                "SELECT ts, source, event_type, pid, path, severity, rule_title "
+                f"FROM events WHERE {where} ORDER BY ts DESC LIMIT 500"
+            )
+
+            rows = self.store.query(sql, tuple(params))
+            self.finished.emit(rows)
+        except Exception as exc:
+            self.finished.emit(exc)
+
 # ========== WORKER PARA ZERO TRUST ==========
 class ZTWorker(QObject):
     """Ejecuta zt.attest() en un hilo para no bloquear la UI."""
@@ -987,9 +1353,18 @@ class TaskDialog(QDialog):
         }
 
 # ========== MAIN ==========
-if __name__ == "__main__":
+def main():
+    """
+    Punto de entrada de la GUI. Puede ser llamada desde:
+      - El bloque __main__ de este archivo (uso directo).
+      - El wrapper /usr/bin/antivirus-dragon-gui (instalación vía .deb).
+    """
     app = QApplication(sys.argv)
     app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt6())
     window = AntivirusGUI()
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
