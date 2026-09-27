@@ -83,3 +83,12 @@ class ScanScheduler:
         else:
             self.scheduler.start()
             print(f"{Colors.BOLD}{Colors.GREEN}[+] Planificador activo con {jobs_added} tareas.{Colors.RESET}")
+
+    def stop(self):
+        """Detiene el planificador de tareas de forma ordenada."""
+        try:
+            if getattr(self.scheduler, "running", False):
+                self.scheduler.shutdown(wait=False)
+                print("[+] Planificador detenido.")
+        except Exception as exc:
+            print(f"[!] Error deteniendo planificador: {exc}")
