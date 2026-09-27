@@ -56,6 +56,14 @@ except ImportError:
     EBPFTelemetry = None
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Ruta de las reglas YARA: preferir /usr/share/antivirus-linux-dragon/yara_rules
+# si estamos instalados vía .deb, si no, la del directorio actual.
+_YARA_SYSTEM_PATH = Path("/usr/share/antivirus-linux-dragon/yara_rules")
+YARA_RULES_DIR = (
+    _YARA_SYSTEM_PATH if _YARA_SYSTEM_PATH.exists()
+    else SCRIPT_DIR / "yara_rules"
+)
 def _default_config_path() -> Path:
     """Prefiere config.local.json (no versionado) sobre config.json."""
     env = os.environ.get("AV_CONFIG_PATH")
@@ -179,7 +187,10 @@ class AntivirusDaemon:
         #   - no hay estado mutable compartido entre scan_file()s
         # Benchmark demostró que envolverlo en ThreadSafeProxy añade
         # +154% de overhead sin aportar seguridad real. Por eso NO se usa proxy.
-        self.engine = ScannerEngine(self.config)
+        # Pasar YARA_RULES_DIR al engine para que use la ruta absoluta
+        engine_config = dict(self.config)
+        engine_config["yara_rules_dir"] = str(YARA_RULES_DIR)
+        self.engine = ScannerEngine(engine_config)
 
         self.scheduler = ScanScheduler(self.engine, self.config)
         self.realtime = RealtimeMonitor(self.engine, self.config)
@@ -228,26 +239,23 @@ class AntivirusDaemon:
 
     # --------------------------------------------- signatures
     def update_signatures(self) -> None:
-        logger.info("Actualizando firmas ClamAV...")
-        try:
-            result = subprocess.run(
-                ["sudo", "-n", "freshclam"],
-                check=True,
-                timeout=120,
-                capture_output=True,
-                text=True,
-            )
-            logger.info("Firmas actualizadas correctamente.")
-        except subprocess.CalledProcessError as exc:
-            logger.warning(
-                "freshclam terminó con error (código %s): %s",
-                exc.returncode,
-                (exc.stderr or "").strip() or "sin detalle",
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("freshclam superó el tiempo límite de 120s.")
-        except FileNotFoundError:
-            logger.error("'sudo' o 'freshclam' no están instalados o no están en PATH.")
+        """
+        Las firmas de ClamAV se actualizan mediante el servicio del sistema
+        'clamav-freshclam.service' (que corre cada hora por defecto).
+        NO llamamos a 'freshclam' desde aquí porque:
+          1. El servicio systemd del daemon tiene NoNewPrivileges=true,
+             que impide que 'sudo' funcione.
+          2. El servicio clamav-freshclam ya hace esta tarea periódicamente.
+          3. Intentar ejecutarlo con sudo rompería el aislamiento del daemon.
+
+        Para forzar una actualización manual, el administrador puede ejecutar:
+            sudo systemctl start clamav-freshclam.service
+        """
+        logger.info(
+            "Las firmas de ClamAV se actualizan vía clamav-freshclam.service. "
+            "Para forzar una actualización manual: "
+            "sudo systemctl start clamav-freshclam.service"
+        )
 
     def manual_update(self) -> None:
         logger.info("Actualización manual solicitada.")

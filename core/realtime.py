@@ -31,6 +31,9 @@ class EventHandler(FileSystemEventHandler):
         for excluded in EXCLUDED_PATHS:
             if path.startswith(excluded + "/") or path == excluded:
                 return
+            # Excluir por nombre de directorio en la ruta
+            if f"/{excluded}/" in path or path.endswith(f"/{excluded}"):
+                return
 
         # Excluir extensiones de logs/temporales
         ext = os.path.splitext(path)[1].lower()
@@ -53,19 +56,52 @@ class EventHandler(FileSystemEventHandler):
         except Exception as exc:
             logger.warning("Error escaneando %s: %s", path, exc)
             return
-        if infected:
-            print(f"\n{Colors.RED}🔥 [REAL-TIME] Amenaza en {path}{Colors.RESET}")
-            self.engine.quarantine(path, mot)
-        elif self.archive_scanner:
-            is_inf, _ = self.archive_scanner.extract_and_scan(path)
-            if is_inf:
-                self.engine.quarantine(path, "Contenido comprimido malicioso")
 
-# Rutas que NUNCA deben ser vigiladas: logs del propio antivirus,
-# sockets, archivos temporales del sistema, cuarentena del propio
-# antivirus. Sin esto, el daemon se escanea a sí mismo y entra en un
-# bucle infinito (escribe log -> se detecta -> escanea -> escribe log...).
+        if infected:
+            # MODO SOLO-ALERTAR: el realtime NO mueve archivos a cuarentena
+            # automáticamente. Los falsos positivos en archivos de usuario
+            # (cookies, caches, configuración de apps) rompen el sistema si
+            # se mueven automáticamente.
+            #
+            # En su lugar, se emite una alerta a la GUI (pestaña Pre-cuarentena)
+            # donde el usuario decide con un informe detallado si autoriza
+            # la cuarentena o no.
+            logger.warning(
+                "[REAL-TIME] Amenaza detectada (NO movida a cuarentena): %s -> %s",
+                path, mot
+            )
+            print(f"\n{Colors.RED}⚠️  [REAL-TIME] Amenaza detectada: {path}{Colors.RESET}")
+            print(f"{Colors.YELLOW}    Motivo: {mot}{Colors.RESET}")
+            print(f"{Colors.YELLOW}    Acción: enviada a Pre-cuarentena para revisión manual.{Colors.RESET}")
+
+            # Si el engine tiene un callback de alerta (para la GUI), invocarlo
+            callback = getattr(self.engine, "_realtime_alert_callback", None)
+            if callable(callback):
+                try:
+                    callback(path, mot)
+                except Exception as exc:
+                    logger.warning("Callback de alerta falló: %s", exc)
+
+            # Comprobación adicional de ZIP sospechoso (solo informativo)
+            if self.archive_scanner:
+                try:
+                    is_inf, arc_mot = self.archive_scanner.extract_and_scan(path)
+                    if is_inf:
+                        logger.warning(
+                            "[REAL-TIME] Contenido comprimido malicioso en %s: %s",
+                            path, arc_mot
+                        )
+                except Exception:
+                    pass
+
+# ============================================================
+#  Exclusión de rutas y extensiones del watcher en tiempo real
+# ============================================================
+# Rutas que NUNCA deben vigilarse: logs del propio antivirus,
+# sockets, archivos temporales del sistema, cuarentena, y directorios
+# de configuración/datos de aplicaciones (causan falsos positivos).
 EXCLUDED_PATHS = frozenset({
+    # Directorios del propio antivirus y del sistema
     "/var/lib/antivirus-linux-dragon",
     "/var/log/antivirus-linux-dragon",
     "/run/antivirus-linux-dragon",
@@ -74,14 +110,67 @@ EXCLUDED_PATHS = frozenset({
     "/sys",
     "/dev",
     "/run",
+    "/var/crash",
+
+    # Directorios de configuración y datos de aplicaciones.
+    # NO son malware por definición, y escanearlos produce falsos
+    # positivos (cookies, bases SQLite, caches, PNGs de apps, etc.)
+    ".config",
+    ".local/share",
+    ".var/app",
+    ".mozilla",
+    ".thunderbird",
+    ".cache",
+    ".local",
+
+    # Directorios que causan overflow de inotify por su volumen
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".npm",
+    ".cargo",
+    ".rustup",
+    ".pyenv",
+    ".nvm",
+    ".gradle",
+    ".m2",
+    "site-packages",
+    "dist-packages",
+    ".Trash",
+    "snap",
+    ".snap",
 })
 
 # Extensiones que NUNCA deben escanearse en tiempo real:
-# son logs, sockets, archivos temporales, o archivos de sistema.
+# logs, sockets, archivos temporales, multimedia, ofimática, bases
+# de datos y archivos del entorno gráfico.
 EXCLUDED_EXTENSIONS = frozenset({
+    # Logs y archivos temporales
     ".log", ".log.1", ".log.2", ".log.3", ".log.gz",
     ".sock", ".socket", ".pid", ".lock", ".swp", ".swx",
     ".tmp", ".cache",
+
+    # Multimedia (no pueden contener malware ejecutable en Linux)
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".ico",
+    ".mp3", ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flac", ".wav", ".ogg",
+
+    # Ofimática y documentos
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
+
+    # Texto plano y datos
+    ".txt", ".md", ".rst", ".csv", ".json", ".xml", ".html", ".css",
+
+    # Fuentes
+    ".ttf", ".otf", ".woff", ".woff2",
+
+    # Bases de datos de apps
+    ".sqlite", ".sqlite3", ".db", ".ldb", ".mdb",
+    "-journal", "-wal", "-shm",
+
+    # Entorno gráfico
+    ".xsession-errors",
 })
 
 

@@ -51,7 +51,15 @@ class ScannerEngine:
         self.cuarentena = config.get('cuarentena', '/opt/av_cuarentena')
         os.makedirs(self.cuarentena, exist_ok=True)
 
-        self.yara = YaraScanner()
+        # Pasar la ruta de las reglas YARA si está configurada.
+        # En producción (/usr/lib/...) las reglas viven en
+        # /usr/share/antivirus-linux-dragon/yara_rules/ por lo que no
+        # podemos usar la ruta relativa por defecto.
+        yara_rules_path = config.get(
+            "yara_rules_dir",
+            str(Path(__file__).resolve().parent.parent / "yara_rules")
+        )
+        self.yara = YaraScanner(yara_rules_path)
         self.load_clamav_signatures()
 
         self.clamd_pool = None
@@ -70,40 +78,137 @@ class ScannerEngine:
 
     # ------------------------------------------------------------------ firmas
     def load_clamav_signatures(self) -> int:
+        """
+        Carga firmas desde /var/lib/clamav.
+
+        Estrategia:
+          1. Si existen archivos .cvd/.cld (formato binario comprimido de
+             ClamAV), extraerlos con 'sigtool --unpack' a un cache.
+          2. Leer los archivos .hdb/.hdu/.ndb/.ndu/.mdb/.mdu del cache
+             y de /var/lib/clamav directamente.
+          3. Cargar los hashes MD5/SHA1 y los patrones hex en memoria.
+
+        El cache se invalida cuando el .cvd/.cld es más nuevo.
+        """
+        import subprocess
+        import time as _t
+
         md5: set[str] = set()
         sha1: set[str] = set()
         hex_sigs: list[bytes] = []
         count = 0
         max_firmas = self.config.get('max_firmas', 300000)
 
-        for base in ("/var/lib/clamav", "/usr/local/share/clamav"):
-            base_path = Path(base)
-            if not base_path.is_dir():
+        # --- 1. Extraer .cvd/.cld al cache si es necesario ---
+        clam_dir = Path("/var/lib/clamav")
+        cache_dir = Path(self.config.get(
+            'sig_cache_dir',
+            '/var/lib/antivirus-linux-dragon/sigs_cache'
+        ))
+
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            # Fallback: usar /tmp si no tenemos permisos
+            cache_dir = Path("/tmp/antivirus_sigs_cache")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+        for cvd_file in clam_dir.glob("*.cvd"):
+            self._extract_cvd_to_cache(cvd_file, cache_dir)
+        for cld_file in clam_dir.glob("*.cld"):
+            self._extract_cvd_to_cache(cld_file, cache_dir)
+
+        # --- 2. Recolectar archivos de firmas ---
+        # Directorios a escanear (en orden): cache primero, luego /var/lib/clamav
+        search_dirs = [cache_dir, clam_dir]
+
+        # Extensiones: hashes MD5/SHA1 y patrones NDB
+        hash_extensions = ("*.hdb", "*.hdu", "*.mdb", "*.mdu")
+        hex_extensions = ("*.ndb", "*.ndu")
+
+        for base_dir in search_dirs:
+            if not base_dir.is_dir():
                 continue
 
-            for pattern in ("*.hdb", "*.hdu"):
-                count = self._parse_hdb(base_path.glob(pattern), md5, sha1, count, max_firmas)
-            for pattern in ("*.ndb",):
-                count = self._parse_ndb(base_path.glob(pattern), hex_sigs, count, max_firmas)
+            # Firmas de hash (MD5)
+            for pattern in hash_extensions:
+                for sig_file in base_dir.glob(pattern):
+                    count = self._parse_hdb(
+                        [sig_file], md5, sha1, count, max_firmas
+                    )
+                    if count >= max_firmas:
+                        break
 
-            unofficial = base_path / "unofficial-sigs"
+            # Firmas hex (NDB)
+            for pattern in hex_extensions:
+                for sig_file in base_dir.glob(pattern):
+                    count = self._parse_ndb(
+                        [sig_file], hex_sigs, count, max_firmas
+                    )
+                    if count >= max_firmas:
+                        break
+
+            # Firmas de terceros en subdirectorio unofficial-sigs
+            unofficial = base_dir / "unofficial-sigs"
             if unofficial.is_dir():
-                for pattern in ("*.hdb", "*.hdu"):
-                    count = self._parse_hdb(unofficial.glob(pattern), md5, sha1, count, max_firmas)
-                for pattern in ("*.ndb",):
-                    count = self._parse_ndb(unofficial.glob(pattern), hex_sigs, count, max_firmas)
+                for pattern in hash_extensions:
+                    for sig_file in unofficial.glob(pattern):
+                        count = self._parse_hdb(
+                            [sig_file], md5, sha1, count, max_firmas
+                        )
+                for pattern in hex_extensions:
+                    for sig_file in unofficial.glob(pattern):
+                        count = self._parse_ndb(
+                            [sig_file], hex_sigs, count, max_firmas
+                        )
 
-            break
-
+        # --- 3. Swap atómico ---
         with self._signatures_lock:
             self.firmas_md5 = frozenset(md5)
             self.firmas_sha1 = frozenset(sha1)
             self.firmas_hex = tuple(hex_sigs)
             self.total_firmas = count
 
-        logger.info("Cargadas %d firmas ClamAV (oficiales + terceros).", count)
-        print(f"{Colors.BLUE}[+] Cargadas {count} firmas ClamAV.{Colors.RESET}")
+        logger.info("Cargadas %d firmas ClamAV (incluye .cvd extraídos).", count)
+        print(f"{Colors.BLUE}[+] Cargadas {count} firmas ClamAV "
+              f"(MD5: {len(md5)}, SHA1: {len(sha1)}, hex: {len(hex_sigs)}).{Colors.RESET}")
         return count
+
+    def _extract_cvd_to_cache(self, cvd_path: Path, cache_dir: Path) -> None:
+        """
+        Extrae un .cvd/.cld al cache usando 'sigtool --unpack'.
+        Solo extrae si el .cvd es más nuevo que el cache (idempotente).
+        """
+        import subprocess
+
+        marker = cache_dir / f".{cvd_path.name}.extracted"
+        # Si el cache es más nuevo que el .cvd, no re-extraer
+        if marker.exists() and marker.stat().st_mtime >= cvd_path.stat().st_mtime:
+            return
+
+        try:
+            # sigtool --unpack extrae al directorio actual (cwd)
+            result = subprocess.run(
+                ["sigtool", f"--unpack={cvd_path}"],
+                cwd=str(cache_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                marker.touch()
+                logger.info("Extraído %s al cache", cvd_path.name)
+            else:
+                logger.warning(
+                    "Fallo extrayendo %s: %s", cvd_path.name, result.stderr[:200]
+                )
+        except FileNotFoundError:
+            logger.warning("sigtool no encontrado; no se pueden extraer .cvd")
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout extrayendo %s", cvd_path.name)
+        except Exception as exc:
+            logger.warning("Error extrayendo %s: %s", cvd_path.name, exc)
+
 
     def _parse_hdb(self, files, md5_set, sha1_set, count, limit):
         for f in files:

@@ -1,44 +1,45 @@
 """
 core/cti_feed.py
-Consumidor de feeds de inteligencia de amenazas en STIX 2.1 vía TAXII 2.1.
+Consumidor de feeds de inteligencia de amenazas.
 
-Soporta múltiples servidores (Anomali Limo, CIRCL, feeds privados).
-Extrae IOCs (indicators) y los expone en IOCStore para consulta rápida:
-  - IPs maliciosas
+Soporta dos tipos de feeds:
+  1. Feeds REST públicos sin autenticación (Feodo Tracker, Spamhaus DROP).
+  2. Feeds REST con Auth-Key gratuita (URLhaus, ThreatFox de abuse.ch).
+
+Extrae IOCs y los expone en IOCStore para consulta rápida:
+  - IPs maliciosas (IPv4)
   - Dominios maliciosos
-  - Hashes SHA-256 de archivos
+  - Hashes SHA-256
   - URLs maliciosas
 
-Uso básico:
-    cti = CTIClient(feeds=[("https://limo.anomali.com/api/v1/taxii2/taxii/", "guest", "guest")])
-    cti.start(interval_seconds=3600)
-    ...
-    if cti.store.is_malicious_ip("1.2.3.4"):
-        soar.block_ip("1.2.3.4")
+Los feeds sin auth están activos por defecto. Los feeds con auth requieren
+una Auth-Key gratuita de abuse.ch (https://auth.abuse.ch/).
 
-Si taxii2-client no está instalado, CTIClient funciona igual pero
-start() devuelve False y el store queda vacío.
+Uso:
+    cti = CTIClient()
+    cti.update_now()
+    if cti.store.is_malicious_ip("1.2.3.4"): ...
 """
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 
+import requests
+
 logger = logging.getLogger("antivirus.cti")
 
-try:
-    from taxii2client.v21 import Server
-    HAVE_TAXII = True
-except ImportError:
-    # Fallback para permitir tests sin la dependencia instalada.
-    # El código que use Server real debe comprobar HAVE_TAXII primero.
-    Server = None  # type: ignore[assignment]
-    HAVE_TAXII = False
+REQUEST_TIMEOUT = 30
 
 
+# ============================================================
+#  IOC STORE
+# ============================================================
 @dataclass
 class IOCStore:
     """Contenedor thread-safe de IOCs extraídos de feeds CTI."""
@@ -46,9 +47,20 @@ class IOCStore:
     domains: set[str] = field(default_factory=set)
     sha256: set[str] = field(default_factory=set)
     urls: set[str] = field(default_factory=set)
+    cidr_ranges: list = field(default_factory=list)  # rangos Spamhaus
 
     def is_malicious_ip(self, ip: str) -> bool:
-        return ip in self.ipv4
+        if ip in self.ipv4:
+            return True
+        # Verificar rangos CIDR (Spamhaus DROP)
+        try:
+            addr = ipaddress.ip_address(ip)
+            for net in self.cidr_ranges:
+                if addr in net:
+                    return True
+        except ValueError:
+            pass
+        return False
 
     def is_malicious_domain(self, domain: str) -> bool:
         return domain.lower() in self.domains
@@ -60,34 +72,80 @@ class IOCStore:
         return url in self.urls
 
     def total(self) -> int:
-        return len(self.ipv4) + len(self.domains) + len(self.sha256) + len(self.urls)
+        return (
+            len(self.ipv4)
+            + len(self.domains)
+            + len(self.sha256)
+            + len(self.urls)
+            + len(self.cidr_ranges)
+        )
 
 
-# Feeds públicos por defecto (Anomali Limo: guest/guest)
-DEFAULT_FEEDS = [
-    ("https://limo.anomali.com/api/v1/taxii2/taxii/", "guest", "guest"),
+# ============================================================
+#  FEEDS POR DEFECTO
+# ============================================================
+# Feeds sin autenticación (siempre activos)
+DEFAULT_FEEDS_NO_AUTH = [
+    {
+        "name": "Feodo Tracker (abuse.ch)",
+        "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
+        "type": "feodo_json",
+    },
+    {
+        "name": "Spamhaus DROP",
+        "url": "https://www.spamhaus.org/drop/drop.txt",
+        "type": "spamhaus_drop",
+    },
+]
+
+# Feeds con Auth-Key gratuita de abuse.ch (https://auth.abuse.ch/)
+# Deja auth_key vacío para deshabilitarlos.
+DEFAULT_FEEDS_AUTH = [
+    {
+        "name": "URLhaus (abuse.ch)",
+        "url": "https://urlhaus-api.abuse.ch/v1/urls/recent/",
+        "type": "urlhaus_json",
+        "auth_key": "",  # <-- pega tu Auth-Key aquí
+    },
+    {
+        "name": "ThreatFox (abuse.ch)",
+        "url": "https://threatfox-api.abuse.ch/api/v1/",
+        "type": "threatfox_json",
+        "auth_key": "",  # <-- pega tu Auth-Key aquí
+    },
 ]
 
 
+# ============================================================
+#  CTI CLIENT
+# ============================================================
 class CTIClient:
     def __init__(self, feeds: list | None = None):
-        self.feeds = feeds if feeds is not None else DEFAULT_FEEDS
+        """
+        :param feeds: lista de dicts con la configuración de feeds. Si es
+                      None, se usan DEFAULT_FEEDS_NO_AUTH + DEFAULT_FEEDS_AUTH.
+        """
+        if feeds is None:
+            feeds = list(DEFAULT_FEEDS_NO_AUTH)
+            # Solo añadir feeds con auth si tienen auth_key
+            for f in DEFAULT_FEEDS_AUTH:
+                if f.get("auth_key"):
+                    feeds.append(f)
+
+        self.feeds = feeds
         self.store = IOCStore()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_update_ts: float = 0.0
         self.last_error: str | None = None
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": "AntivirusLinuxDragon/1.0 (+https://github.com/jean020889/Antivirus_Linux_Daemon)"
+        })
 
     # ----------------------------------------------------------- public API
     def start(self, interval_seconds: int = 3600) -> bool:
-        """
-        Arranca el hilo de actualización periódica.
-        Devuelve True si el hilo se lanzó, False si taxii2-client no está instalado.
-        """
-        if not HAVE_TAXII:
-            logger.warning("taxii2-client no instalado; CTI deshabilitado.")
-            return False
         if self._thread and self._thread.is_alive():
             logger.warning("CTI ya está corriendo.")
             return True
@@ -106,16 +164,15 @@ class CTIClient:
             self._thread.join(timeout=5)
 
     def update_now(self) -> int:
-        """
-        Fuerza una actualización sincrónica. Devuelve el total de IOCs
-        tras la actualización.
-        """
+        """Fuerza una actualización sincrónica. Devuelve total de IOCs."""
         for feed in self.feeds:
+            name = feed.get("name", feed.get("url", "?"))
             try:
-                self._fetch_feed(*feed)
+                self._fetch_feed(feed)
+                logger.info("Feed OK: %s", name)
             except Exception as exc:
-                self.last_error = str(exc)
-                logger.exception("Fallo al consumir feed %s", feed[0])
+                self.last_error = str(exc)[:200]
+                logger.warning("Fallo al consumir feed %s: %s", name, self.last_error)
         self.last_update_ts = time.time()
         return self.store.total()
 
@@ -125,80 +182,123 @@ class CTIClient:
             self.update_now()
             self._stop.wait(interval)
 
-    def _fetch_feed(self, url: str, user: str = "", password: str = "") -> None:
-        """Recorre las colecciones de un servidor TAXII y consume sus objetos."""
-        server = Server(url, user=user, password=password)
-        roots = server.api_roots
-        if not roots:
-            logger.warning("TAXII server sin api_roots: %s", url)
+    def _fetch_feed(self, feed: dict) -> None:
+        feed_type = feed.get("type")
+        url = feed["url"]
+        auth_key = feed.get("auth_key", "")
+
+        headers = {}
+        if auth_key:
+            headers["Auth-Key"] = auth_key
+
+        # ThreatFox usa POST en lugar de GET
+        if feed_type == "threatfox_json":
+            payload = {"query": "get_iocs", "days": 1}
+            response = self._session.post(
+                url,
+                data=payload,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        else:
+            response = self._session.get(
+                url,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+        response.raise_for_status()
+
+        # Dispatch según tipo
+        if feed_type == "feodo_json":
+            self._parse_feodo(response.json())
+        elif feed_type == "spamhaus_drop":
+            self._parse_spamhaus(response.text)
+        elif feed_type == "urlhaus_json":
+            self._parse_urlhaus(response.json())
+        elif feed_type == "threatfox_json":
+            self._parse_threatfox(response.json())
+        else:
+            logger.warning("Tipo de feed desconocido: %s", feed_type)
+
+    # ----------------------------------------------------------- parsers
+    def _parse_feodo(self, data) -> None:
+        """Feodo Tracker: JSON con array de objetos {ip_address, malware, ...}"""
+        if not isinstance(data, list):
+            logger.warning("Feodo: formato inesperado, esperaba lista")
             return
-
-        for api_root in roots:
-            try:
-                collections = list(api_root.collections)
-            except Exception as exc:
-                logger.warning("No se pudieron listar colecciones de %s: %s", url, exc)
-                continue
-
-            for collection in collections:
-                try:
-                    bundle = collection.get_objects()
-                except Exception as exc:
-                    logger.debug("Error leyendo colección %s: %s", getattr(collection, "id", "?"), exc)
-                    continue
-
-                for obj in bundle.get("objects", []):
-                    self._ingest_stix_object(obj)
-
-        logger.info("CTI actualizado: %d IPs, %d dominios, %d hashes, %d URLs",
-                    len(self.store.ipv4), len(self.store.domains),
-                    len(self.store.sha256), len(self.store.urls))
-
-    def _ingest_stix_object(self, obj: dict) -> None:
-        """Extrae IOCs de un objeto STIX 2.1 de tipo 'indicator'."""
-        if not isinstance(obj, dict) or obj.get("type") != "indicator":
-            return
-        pattern = obj.get("pattern", "")
-        if not isinstance(pattern, str):
-            return
-
+        count = 0
         with self._lock:
-            if "ipv4-addr:value" in pattern:
-                ip = self._extract(pattern, "ipv4-addr:value")
+            for entry in data:
+                ip = entry.get("ip_address")
                 if ip:
                     self.store.ipv4.add(ip)
+                    count += 1
+        logger.info("  Feodo: +%d IPs (total IPs: %d)", count, len(self.store.ipv4))
 
-            elif "domain-name:value" in pattern:
-                d = self._extract(pattern, "domain-name:value")
-                if d:
-                    self.store.domains.add(d.lower())
+    def _parse_spamhaus(self, text: str) -> None:
+        """Spamhaus DROP: texto plano con líneas '<CIDR> ; <referencia>'"""
+        count = 0
+        with self._lock:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith(";"):
+                    continue
+                cidr = line.split(";")[0].strip()
+                if not cidr:
+                    continue
+                try:
+                    net = ipaddress.ip_network(cidr, strict=False)
+                    self.store.cidr_ranges.append(net)
+                    count += 1
+                except ValueError:
+                    continue
+        logger.info("  Spamhaus: +%d rangos CIDR (total: %d)", count, len(self.store.cidr_ranges))
 
-            elif "file:hashes.'SHA-256'" in pattern or 'file:hashes."SHA-256"' in pattern:
-                h = self._extract(pattern, "file:hashes.'SHA-256'") or \
-                    self._extract(pattern, 'file:hashes."SHA-256"')
-                if h:
-                    self.store.sha256.add(h.lower())
+    def _parse_urlhaus(self, data: dict) -> None:
+        """URLhaus: JSON con lista de URLs maliciosas."""
+        urls = data.get("urls", [])
+        count = 0
+        with self._lock:
+            for entry in urls:
+                url = entry.get("url")
+                if url:
+                    self.store.urls.add(url)
+                    count += 1
+                # Hostnames / IPs relacionados
+                host = entry.get("host")
+                if host:
+                    self.store.domains.add(host.lower())
+        logger.info("  URLhaus: +%d URLs", count)
 
-            elif "url:value" in pattern:
-                u = self._extract(pattern, "url:value")
-                if u:
-                    self.store.urls.add(u)
-
-    @staticmethod
-    def _extract(pattern: str, key: str) -> str | None:
-        """
-        Extrae el valor de un patrón STIX del tipo:
-            [ipv4-addr:value = '1.2.3.4']
-        Devuelve None si no se encuentra.
-        """
-        marker_double = f'{key} = "'
-        marker_single = f"{key} = '"
-        for marker in (marker_double, marker_single):
-            i = pattern.find(marker)
-            if i < 0:
-                continue
-            quote = marker[-1]
-            j = pattern.find(quote, i + len(marker))
-            if j > i:
-                return pattern[i + len(marker):j]
-        return None
+    def _parse_threatfox(self, data: dict) -> None:
+        """ThreatFox: JSON con query_status + data[]."""
+        if data.get("query_status") != "ok":
+            logger.warning("ThreatFox: query_status=%s", data.get("query_status"))
+            return
+        iocs = data.get("data", [])
+        count_ip = count_dom = count_hash = count_url = 0
+        with self._lock:
+            for entry in iocs:
+                ioc_type = entry.get("ioc_type", "")
+                ioc_value = entry.get("ioc", "")
+                if not ioc_value:
+                    continue
+                if ioc_type == "ip:port":
+                    ip = ioc_value.split(":")[0]
+                    self.store.ipv4.add(ip)
+                    count_ip += 1
+                elif ioc_type == "domain":
+                    self.store.domains.add(ioc_value.lower())
+                    count_dom += 1
+                elif ioc_type in ("sha256_hash", "md5_hash"):
+                    if ioc_type == "sha256_hash":
+                        self.store.sha256.add(ioc_value.lower())
+                        count_hash += 1
+                elif ioc_type == "url":
+                    self.store.urls.add(ioc_value)
+                    count_url += 1
+        logger.info(
+            "  ThreatFox: +%d IPs, +%d dominios, +%d hashes, +%d URLs",
+            count_ip, count_dom, count_hash, count_url,
+        )
