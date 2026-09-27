@@ -1,0 +1,16 @@
+# Imagen mínima para sandbox de malware
+# Incluye herramientas para capturar comportamiento
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    strace \
+    curl \
+    wget \
+    netcat-openbsd \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Usuario sin privilegios
+RUN useradd -m -s /bin/bash sandbox
+USER sandbox
+WORKDIR /tmp

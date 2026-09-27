@@ -29,6 +29,14 @@ except ImportError:
     ClamdPool = None
     ClamdError = Exception
 
+# Motor de detección de día cero (opcional)
+try:
+    from .zero_day_engine import ZeroDayEngine
+    HAVE_ZERO_DAY = True
+except ImportError:
+    ZeroDayEngine = None
+    HAVE_ZERO_DAY = False
+
 
 logger = logging.getLogger("antivirus.scanner")
 
@@ -59,6 +67,15 @@ class ScannerEngine:
             "yara_rules_dir",
             str(Path(__file__).resolve().parent.parent / "yara_rules")
         )
+        # Motor de detección de día cero (multicapa)
+        self.zero_day = None
+        if HAVE_ZERO_DAY and config.get("zero_day_enabled", True):
+            try:
+                self.zero_day = ZeroDayEngine(config)
+                logger.info("ZeroDayEngine activado")
+            except Exception as exc:
+                logger.warning("ZeroDayEngine no inicializado: %s", exc)
+
         self.yara = YaraScanner(yara_rules_path)
         self.load_clamav_signatures()
 
@@ -313,7 +330,25 @@ class ScannerEngine:
                 logger.debug("clamd falló en %s (%s); continuando con heurística.", filepath, exc)
 
         # --- 3. Heurística + YARA (siempre) ---
-        return self._heuristic_and_yara(filepath)
+        heuristic_verdict = self._heuristic_and_yara(filepath)
+        if heuristic_verdict[0]:
+            return heuristic_verdict
+
+        # --- 4. Motor de día cero (para archivos que pasaron todo lo anterior) ---
+        if self.zero_day is not None:
+            try:
+                zde_verdict = self.zero_day.evaluate(filepath)
+                if zde_verdict.is_malicious:
+                    reasons = "; ".join(zde_verdict.reasons[:3])
+                    logger.warning(
+                        "ZeroDay detectó %s (score %.2f): %s",
+                        filepath, zde_verdict.risk_score, reasons
+                    )
+                    return True, f"ZeroDay (score {zde_verdict.risk_score:.2f}): {reasons}"
+            except Exception as exc:
+                logger.debug("ZeroDayEngine falló en %s: %s", filepath, exc)
+
+        return False, "Limpio"
 
     def _heuristic_and_yara(self, filepath):
         res, motivo = self.heuristic_scan(filepath)

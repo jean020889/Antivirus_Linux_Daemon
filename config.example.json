@@ -39,5 +39,8 @@
       "minute": 0,
       "active": true
     }
-  ]
+  ],
+  "sandbox_enabled": true,
+  "zero_day_enabled": true,
+  "risk_threshold": 0.5
 }

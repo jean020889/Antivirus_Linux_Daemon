@@ -1,0 +1,19 @@
+rule Auto_zero_day_test_f48607169e0f
+{
+    meta:
+        description = "Regla generada automáticamente por Antivirus Linux Dragon"
+        author = "Auto-generator v1.0"
+        confidence = "auto"
+
+    strings:
+        $s1 = { 23212f62696e2f62617368 }
+        $s2 = { 6563686f206332566a636d563058334268655778765957513d207c20247b587d247b597d202d64207c202f62696e2f7368 }
+        $s3 = { 707974686f6e33202d632022696d706f727420736f636b65743b20733d736f636b65742e736f636b657428293b20732e636f6e6e656374282827312e322e332e34272c2034343434292922 }
+        $s4 = { 6d6b6669666f202f746d702f706970655f2424 }
+        $s5 = { 6578656320333c3e2f746d702f706970655f2424 }
+        $s6 = { 726d202d7266202f746d702f73656e7369746976655f646174615f2424 }
+        $ip7 = "1.2.3.4" ascii
+
+    condition:
+        3 of ($s*) or any of ($ip*)
+}
