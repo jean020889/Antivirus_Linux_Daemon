@@ -144,7 +144,26 @@ class SyscallAnomalyDetector:
         elif os.environ.get("AV_ML_MODEL_DIR"):
             base = Path(os.environ["AV_ML_MODEL_DIR"])
         else:
-            base = Path.home() / ".local/share/antivirus/ml_models"
+            # Orden de preferencia:
+            #   1. /var/lib/antivirus-linux-dragon/ml_models (producción)
+            #   2. ~/.local/share/antivirus/ml_models (desarrollo)
+            #   3. /tmp/antivirus_ml_models (último recurso)
+            candidates = [
+                Path("/var/lib/antivirus-linux-dragon/ml_models"),
+                Path.home() / ".local/share/antivirus/ml_models",
+                Path("/tmp/antivirus_ml_models"),
+            ]
+            base = None
+            for c in candidates:
+                try:
+                    c.mkdir(parents=True, exist_ok=True)
+                    base = c
+                    break
+                except (PermissionError, OSError):
+                    continue
+            if base is None:
+                import tempfile
+                base = Path(tempfile.mkdtemp(prefix="av_ml_"))
 
         try:
             base.mkdir(parents=True, exist_ok=True)

@@ -45,7 +45,21 @@ class ZeroDayEngine:
         self.config = config or {}
         self.static = StaticAnalyzer()
         self.ml = SyscallAnomalyDetector()
-        self.yara_gen = YaraRuleGenerator()
+        # YaraRuleGenerator con ruta configurable. Por defecto intenta
+        # escribir en /var/lib/antivirus-linux-dragon/yara_rules_generated
+        # para evitar problemas de permisos en producción.
+        yara_gen_dir = self.config.get(
+            "yara_generated_dir",
+            "/var/lib/antivirus-linux-dragon/yara_rules_generated",
+        )
+        try:
+            self.yara_gen = YaraRuleGenerator(yara_gen_dir)
+        except (PermissionError, OSError) as exc:
+            logger.warning(
+                "No se pudo usar %s para reglas YARA (%s). Usando fallback.",
+                yara_gen_dir, exc,
+            )
+            self.yara_gen = YaraRuleGenerator()
         self.sandbox = Sandbox(enabled=self.config.get("sandbox_enabled", True))
         self.risk_threshold = self.config.get("risk_threshold", 0.6)
 

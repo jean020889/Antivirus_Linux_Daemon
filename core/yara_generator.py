@@ -42,9 +42,43 @@ class YaraRuleGenerator:
       4. Generar regla YARA con esos patrones.
     """
 
-    def __init__(self, output_dir: str = "yara_rules/generated"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, output_dir: str | None = None):
+        """
+        Directorio donde se guardan las reglas YARA generadas.
+        Orden de preferencia:
+          1. Argumento explícito output_dir
+          2. /var/lib/antivirus-linux-dragon/yara_rules_generated (producción)
+          3. ./yara_rules/generated (desarrollo)
+          4. /tmp/yara_rules_generated (último recurso)
+        """
+        if output_dir:
+            base = Path(output_dir)
+        else:
+            # Intentar escribir en /var/lib (donde sí tiene permiso el daemon)
+            candidates = [
+                Path("/var/lib/antivirus-linux-dragon/yara_rules_generated"),
+                Path("yara_rules/generated"),
+                Path("/tmp/yara_rules_generated"),
+            ]
+            base = None
+            for candidate in candidates:
+                try:
+                    candidate.mkdir(parents=True, exist_ok=True)
+                    # Probar que se puede escribir
+                    test_file = candidate / ".write_test"
+                    test_file.touch()
+                    test_file.unlink()
+                    base = candidate
+                    break
+                except (PermissionError, OSError):
+                    continue
+            if base is None:
+                # Último recurso absoluto
+                import tempfile
+                base = Path(tempfile.mkdtemp(prefix="av_yara_"))
+                logger.warning("Sin permisos en rutas estándar; usando %s", base)
+
+        self.output_dir = base
         self.generated_rules: list[GeneratedRule] = []
 
     def generate_from_file(
