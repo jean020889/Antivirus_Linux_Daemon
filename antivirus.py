@@ -23,6 +23,14 @@ from core.realtime import RealtimeMonitor
 from core.processes import ProcessScanner
 from core.memory_scanner import MemoryScanner
 
+# eBPF es opcional: requiere BCC instalado en el sistema
+try:
+    from core.ebpf_telemetry import EBPFTelemetry
+    HAS_EBPF = True
+except ImportError:
+    EBPFTelemetry = None
+    HAS_EBPF = False
+
 
 class Colors:
     RED = '\033[91m'
@@ -311,7 +319,6 @@ if __name__ == "__main__":
 def _start_ebpf_telemetry(self):
     """Inicia telemetría eBPF (extensión)."""
     try:
-        from core.ebpf_telemetry import EBPFTelemetry
         from core.db import DB
 
         db = DB()
