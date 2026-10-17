@@ -24,3 +24,5 @@ pyclamd/
 .env
 .env.local
 *.key
+coverage.xml
+*.pyc
