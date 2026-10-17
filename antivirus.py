@@ -357,14 +357,6 @@ def _start_ebpf_telemetry(self):
         self.ebpf = None
 
 
-# Extender AntivirusDaemon
-if 'AntivirusDaemon' in dir():
-    _orig_start = AntivirusDaemon.start
-    def _extended_start(self):
-        _orig_start(self)
-        _start_ebpf_telemetry(self)
-    AntivirusDaemon.start = _extended_start
-
 
 
 # ============================================

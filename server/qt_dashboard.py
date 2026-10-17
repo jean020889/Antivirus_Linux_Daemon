@@ -165,6 +165,16 @@ class ServerDashboard(QMainWindow):
         from datetime import datetime
         self.last_update.setText(f"Actualizado: {datetime.now().strftime('%H:%M:%S')}")
 
+    def refresh_all(self):
+        """Refresca todos los paneles que tengan método refresh()."""
+        for i in range(self.stack.count()):
+            panel = self.stack.widget(i)
+            if hasattr(panel, 'refresh'):
+                try:
+                    panel.refresh()
+                except Exception as e:
+                    print(f"[!] Error refrescando panel {i}: {e}")
+
     def navigate_to(self, idx):
         self.stack.setCurrentIndex(idx)
         self.sidebar.set_active(idx)

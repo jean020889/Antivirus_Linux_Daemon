@@ -12,8 +12,6 @@ def qapp():
 
 @pytest.fixture
 def dashboard(qapp):
-    # DB() fallará sin PostgreSQL → dashboard cae en rama "sin DB"
-    # pero sigue siendo testeable a nivel de UI
     return ServerDashboard("http://localhost:8000", "test-key")
 
 
@@ -24,24 +22,19 @@ def test_dashboard_initializes(dashboard, qtbot):
 
 def test_sidebar_has_all_nav_buttons(dashboard, qtbot):
     qtbot.addWidget(dashboard)
-    # 8 botones definidos en Sidebar.items
     assert len(dashboard.sidebar.buttons) == 8
 
 
 def test_navigate_to_switches_panel(dashboard, qtbot):
     qtbot.addWidget(dashboard)
-    # Sin DB solo hay 1 panel (mensaje de error), así que test genérico:
-    initial_idx = dashboard.stack.currentIndex()
     dashboard.navigate_to(0)
     assert dashboard.stack.currentIndex() == 0
-    # El título debe haberse actualizado
     assert "Dashboard" in dashboard.page_title.text()
 
 
 def test_refresh_all_does_not_crash(dashboard, qtbot):
-    """refresh_all() debe ser seguro incluso sin DB."""
     qtbot.addWidget(dashboard)
-    dashboard.refresh_all()  # no debe lanzar
+    dashboard.refresh_all()
 
 
 def test_page_title_uses_navigation_titles(dashboard, qtbot):
