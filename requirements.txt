@@ -9,6 +9,9 @@ requests>=2.31.0
 # YARA
 yara-python>=4.3.0
 
+# Cifrado de cuarentena
+cryptography>=42.0.0
+
 # Dashboard web
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0

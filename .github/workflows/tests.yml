@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
     - uses: actions/checkout@v4
@@ -21,7 +23,7 @@ jobs:
     - name: Install system deps
       run: |
         sudo apt-get update
-        sudo apt-get install -y libmagic1
+        sudo apt-get install -y libmagic1 libegl1 libgl1 libxkbcommon0
 
     - name: Install Python deps
       run: |
@@ -29,6 +31,6 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-cov
 
-    - name: Run tests (unit)
+    - name: Run tests
       run: |
-        pytest tests/test_core.py -v --cov=core --cov-report=term
+        pytest tests/ -v --cov=core --cov=server --cov-report=term-missing
