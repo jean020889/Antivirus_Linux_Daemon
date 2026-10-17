@@ -15,7 +15,14 @@ app = FastAPI(title="Antivirus Pro Dashboard")
 
 # Ruta del archivo de estado (compartido con el daemon)
 STATE_FILE = "/var/lib/antivirus-pro/state.json"
-API_TOKEN = os.environ.get("AV_API_TOKEN", "CAMBIA_ESTO_POR_UN_TOKEN_SEGURO")
+API_TOKEN = os.environ.get("AV_API_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError(
+        "AV_API_TOKEN obligatorio. Configúralo en .env "
+        "(genera con: python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    )
+if API_TOKEN.startswith("CAMBIA"):
+    raise RuntimeError("AV_API_TOKEN tiene el placeholder por defecto. Cámbialo en .env")
 
 
 def load_state():

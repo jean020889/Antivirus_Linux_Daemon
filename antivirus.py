@@ -272,6 +272,7 @@ Ejemplos:
         """
     )
 
+    parser.add_argument("--version", action="version", version="Antivirus Pro EDR 3.0")
     parser.add_argument('--daemon', '-d', action='store_true',
                         help='Ejecutar como daemon (todos los módulos)')
     parser.add_argument('--scan', '-s', metavar='RUTA',

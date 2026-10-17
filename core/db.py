@@ -8,6 +8,22 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 
+def _require_env(name: str) -> str:
+    """Obtiene una variable de entorno obligatoria (fail-fast)."""
+    val = os.environ.get(name)
+    if not val:
+        raise RuntimeError(
+            f"Falta variable de entorno obligatoria: {name}\n"
+            f"Consulta .env.example y crea tu .env"
+        )
+    if val in ("changeme", "CAMBIA_ESTO_POR_UN_PASSWORD_FUERTE"):
+        raise RuntimeError(
+            f"{name} tiene el valor por defecto. Cámbialo en .env"
+        )
+    return val
+
+
+
 class DB:
     def __init__(self, config=None):
         config = config or {}
@@ -16,7 +32,7 @@ class DB:
             "port": os.environ.get('AV_DB_PORT', '5432'),
             "dbname": os.environ.get('AV_DB_NAME', 'antivirus_pro'),
             "user": os.environ.get('AV_DB_USER', 'antivirus'),
-            "password": os.environ.get('AV_DB_PASS', 'changeme'),
+            "password": _require_env('AV_DB_PASS'),
         }
 
     @contextmanager

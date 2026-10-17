@@ -3,13 +3,13 @@
 Motor de escaneo profesional usando clamd (demonio de ClamAV) via socket Unix.
 """
 
-import os
-import sys
 import hashlib
+import os
 import subprocess
 import time
-import re
 from datetime import datetime
+
+from .crypto import CryptoEngine
 
 try:
     import pyclamd
@@ -121,7 +121,7 @@ class ScannerEngine:
                 for chunk in iter(lambda: f.read(65536), b''):
                     hash_obj.update(chunk)
             return hash_obj.hexdigest()
-        except (IOError, PermissionError):
+        except (OSError, PermissionError):
             return None
 
     def scan_file(self, filepath):
@@ -214,7 +214,7 @@ class ScannerEngine:
                         if cmd in content:
                             return True, f"Comando peligroso: {cmd.decode('utf-8', errors='ignore')[:30]}"
 
-        except (IOError, PermissionError, OSError):
+        except (PermissionError, OSError):
             pass
 
         return False, "Limpio"
@@ -231,10 +231,10 @@ class ScannerEngine:
         return False, "Limpio"
 
     def quarantine(self, filepath, motivo):
-        import shutil
+        """Mueve archivo a cuarentena CIFRADO con AES-256-GCM."""
         timestamp = int(time.time())
         name = os.path.basename(filepath)
-        dest = os.path.join(self.cuarentena, f"{timestamp}_{name}")
+        dest = os.path.join(self.cuarentena, f"{timestamp}_{name}.enc")
 
         if not os.path.exists(filepath):
             return None
@@ -242,17 +242,19 @@ class ScannerEngine:
             print(f"{Colors.RED}[!] Cuarentena no escribible: {self.cuarentena}{Colors.RESET}")
             return None
 
-        try:
-            os.rename(filepath, dest)
-        except OSError:
-            try:
-                shutil.copy2(filepath, dest)
-                os.remove(filepath)
-            except Exception as e:
-                print(f"{Colors.RED}[!] Error moviendo a cuarentena: {e}{Colors.RESET}")
-                return None
+        # Clave de cifrado obligatoria
+        password = os.environ.get('AV_QUARANTINE_KEY')
+        if not password:
+            print(f"{Colors.RED}[!] Falta AV_QUARANTINE_KEY. Cuarentena abortada.{Colors.RESET}")
+            return None
+        if password in ("changeme", "CAMBIA_ESTO"):
+            print(f"{Colors.RED}[!] AV_QUARANTINE_KEY tiene el valor por defecto.{Colors.RESET}")
+            return None
 
-        if not os.path.exists(dest):
+        try:
+            CryptoEngine.encrypt_file(filepath, dest, password)
+        except Exception as e:
+            print(f"{Colors.RED}[!] Error cifrando a cuarentena: {e}{Colors.RESET}")
             return None
 
         try:
@@ -260,15 +262,24 @@ class ScannerEngine:
         except Exception:
             pass
 
+        # Borrar original solo si el cifrado fue OK
+        try:
+            os.remove(filepath)
+        except OSError as e:
+            print(f"{Colors.YELLOW}[!] Cifrado OK pero no se pudo borrar {filepath}: {e}{Colors.RESET}")
+
+        # Log acompañante (sin datos sensibles)
         try:
             with open(f"{dest}.log", 'w') as log:
                 log.write(f"Origen: {filepath}\n")
                 log.write(f"Motivo: {motivo}\n")
                 log.write(f"Fecha: {datetime.now()}\n")
-                log.write(f"Tamaño: {os.path.getsize(dest)} bytes\n")
+                log.write(f"Tamaño: {os.path.getsize(dest)} bytes (encrypted)\n")
+                log.write("Formato: AVP1 (AES-256-GCM, PBKDF2-600k)\n")
         except Exception:
             pass
 
+        print(f"{Colors.GREEN}[+] Cuarentena cifrada: {dest}{Colors.RESET}")
         return dest
 
     def print_status(self):

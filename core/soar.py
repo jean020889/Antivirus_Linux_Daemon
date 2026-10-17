@@ -21,6 +21,8 @@ import json
 import shutil
 from datetime import datetime
 
+from core.crypto import CryptoEngine
+
 
 class SOAREngine:
     def __init__(self, config):
@@ -90,7 +92,7 @@ class SOAREngine:
         return result
 
     def quarantine_file(self, filepath, reason="SOAR quarantine"):
-        """Mueve archivo a cuarentena con permisos restrictivos."""
+        """Mueve archivo a cuarentena CIFRADO con AES-256-GCM."""
         result = {"action": "quarantine_file", "file": filepath, "success": False}
         try:
             if not os.path.exists(filepath):
@@ -98,26 +100,37 @@ class SOAREngine:
                 self._log_response(result)
                 return result
 
+            # Clave de cifrado obligatoria
+            password = os.environ.get('AV_QUARANTINE_KEY')
+            if not password:
+                raise RuntimeError(
+                    "Falta AV_QUARANTINE_KEY. Configúrala en .env "
+                    "(genera con: python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+                )
+            if password in ("changeme", "CAMBIA_ESTO"):
+                raise RuntimeError("AV_QUARANTINE_KEY tiene el valor por defecto. Cámbialo.")
+
             timestamp = int(time.time())
             basename = os.path.basename(filepath)
-            dest = os.path.join(self.quarantine_dir, f"{timestamp}_{basename}")
+            dest = os.path.join(self.quarantine_dir, f"{timestamp}_{basename}.enc")
 
-            # Intentar rename primero (mismo filesystem)
-            try:
-                os.rename(filepath, dest)
-            except OSError:
-                shutil.copy2(filepath, dest)
-                os.remove(filepath)
-
-            # Permisos restrictivos
+            # Cifrar (CryptoEngine.encrypt_file escribe el .enc)
+            CryptoEngine.encrypt_file(filepath, dest, password)
             os.chmod(dest, 0o600)
 
-            # Log acompañante
+            # Solo borrar el original si el cifrado tuvo éxito
+            try:
+                os.remove(filepath)
+            except OSError as e:
+                result["warning"] = f"No se pudo borrar original: {e}"
+
+            # Log acompañante (sin datos sensibles)
             with open(f"{dest}.log", 'w') as f:
                 f.write(f"Original: {filepath}\n")
                 f.write(f"Reason: {reason}\n")
                 f.write(f"Date: {datetime.now().isoformat()}\n")
-                f.write(f"Size: {os.path.getsize(dest)} bytes\n")
+                f.write(f"Size: {os.path.getsize(dest)} bytes (encrypted)\n")
+                f.write(f"Format: AVP1 (AES-256-GCM, PBKDF2-600k)\n")
 
             result["success"] = True
             result["dest"] = dest
